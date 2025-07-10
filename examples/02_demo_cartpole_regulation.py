@@ -124,32 +124,53 @@ def main():
     print(f"Tempo medio per passo di simulazione: {total_time_ms / N_SIM:.2f} ms.")
 
     _plot_results(Xs.cpu(), Us.cpu(), DT, x_target.cpu(), BATCH_SIZE)
+# ======================== PLOTTING ========================
 
 
-# ======================== FUNZIONI DI PLOTTING ========================
+print("Generazione dei grafici...")
+
+# --- Dati per i grafici ---
+# ======================== FUNZIONI DI PLOTTING (Completa) ========================
 def _plot_results(xs_mpc: torch.Tensor, us_mpc: torch.Tensor, dt: float, target: torch.Tensor, batch_size: int):
+    """Visualizza i risultati della simulazione del Cart-Pole."""
+
+    # --- Dati per i grafici ---
     nx = xs_mpc.shape[-1]
     N_TO_PLOT = min(10, batch_size)
     labels = ["Posizione [m]", "Velocità [m/s]", "Angolo [rad]", "Vel. Angolare [rad/s]"]
     time_state = torch.arange(xs_mpc.shape[1]) * dt
+    time_ctrl = torch.arange(us_mpc.shape[1]) * dt
     colors = plt.cm.viridis(np.linspace(0, 1, N_TO_PLOT))
 
+    # --- Figura 1: Traiettorie di Stato ---
     fig, axs = plt.subplots(nx, 1, figsize=(12, 10), sharex=True)
     fig.suptitle(f"Traiettorie di Stato per {N_TO_PLOT} Agenti (su {batch_size})")
     for i in range(nx):
         for b in range(N_TO_PLOT):
-            axs[i].plot(time_state, xs_mpc[b, :, i], color=colors[b], alpha=0.7)
+            # Aggiungi etichetta solo al primo agente per non affollare la legenda
+            label = f'Agente {b + 1}' if i == 0 else None
+            axs[i].plot(time_state, xs_mpc[b, :, i], color=colors[b], alpha=0.7, label=label)
         axs[i].axhline(target[i].item(), linestyle=":", color="k", label="Target" if i == 0 else "")
-        axs[i].set_ylabel(labels[i]);
+        axs[i].set_ylabel(labels[i])
         axs[i].grid(True)
+
     if N_TO_PLOT > 0:
-        axs[0].legend()
+        fig.legend(loc='upper right')
     axs[-1].set_xlabel("Tempo [s]")
 
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    # --- Figura 2: Comandi di controllo ---
+    plt.figure(figsize=(12, 6))
+    plt.title(f"Comandi di Controllo per {N_TO_PLOT} Agenti")
+    for b in range(N_TO_PLOT):
+        plt.plot(time_ctrl, us_mpc[b, :, 0], color=colors[b], alpha=0.7, label=f'Agente {b + 1}')
+    plt.xlabel("Tempo [s]")
+    plt.ylabel("Forza [N]")
+    plt.grid(True)
+    if N_TO_PLOT > 0:
+        plt.legend()
+
+    # --- Mostra tutte le figure create ---
     plt.show()
-
-
 # ======================== ENTRY-POINT ========================
 if __name__ == "__main__":
     main()

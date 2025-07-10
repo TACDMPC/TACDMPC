@@ -119,10 +119,14 @@ def main():
     total_time_ms = (t_end - t_start) * 1000
     print(f"Simulazione completata in {total_time_ms:.2f} ms.")
 
-    # --- PLOTTING ---
+    # ======================== PLOTTING ========================
+    print("Generazione dei grafici...")
     plt.style.use('seaborn-v0_8-whitegrid')
     colors = ['#0077BB', '#EE7733']
+    time_ax_state = torch.arange(N_sim + 1, device='cpu') * dt
+    time_ax_ctrl = torch.arange(N_sim, device='cpu') * dt
 
+    # --- Figura 1: Plot 2D delle traiettorie ---
     plt.figure(figsize=(10, 8))
     plt.title("Tracking di Traiettoria per 2 Agenti Uniciclo")
     plt.plot(x_ref_full[0, :, 0].cpu(), x_ref_full[0, :, 1].cpu(), '--', color=colors[0], label='Riferimento Agente 1')
@@ -131,15 +135,41 @@ def main():
     plt.plot(Xs[1, :, 0].cpu(), Xs[1, :, 1].cpu(), color=colors[1], label='Traiettoria Agente 2', linewidth=2)
     plt.scatter(x0_batch[:, 0].cpu(), x0_batch[:, 1].cpu(), c=colors, marker='o', s=100, edgecolors='k', zorder=5,
                 label='Punti Iniziali')
-
     plt.xlabel("Posizione X [m]");
     plt.ylabel("Posizione Y [m]");
     plt.legend();
     plt.axis('equal');
     plt.grid(True)
+
+    # --- Figura 2: Plot Errore Quadratico Medio (MSE) ---
+    error_pos = Xs - x_ref_full[:, :N_sim + 1, :]
+    error_theta_wrapped = torch.atan2(torch.sin(error_pos[:, :, 2]), torch.cos(error_pos[:, :, 2]))
+    error_state = torch.stack([error_pos[:, :, 0], error_pos[:, :, 1], error_theta_wrapped], dim=2)
+    mse_state = torch.mean(error_state ** 2, dim=0)
+
+    error_vel = Us - u_ref_full[:, :N_sim, :]
+    mse_vel = torch.mean(error_vel ** 2, dim=0)
+
+    plt.figure(figsize=(14, 7))
+    plt.title("Errore Quadratico Medio di Tracking (Stato e Controllo)")
+    # Errori di stato
+    plt.plot(time_ax_state, mse_state[:, 0].cpu(), label='MSE Errore X', color='#0077BB')
+    plt.plot(time_ax_state, mse_state[:, 1].cpu(), label='MSE Errore Y', color='#33BBEE')
+    plt.plot(time_ax_state, mse_state[:, 2].cpu(), label='MSE Errore Theta', color='#009988')
+    # Errori di controllo
+    plt.plot(time_ax_ctrl, mse_vel[:, 0].cpu(), label='MSE Errore v', linestyle=':', color='#EE7733')
+    plt.plot(time_ax_ctrl, mse_vel[:, 1].cpu(), label='MSE Errore ω', linestyle=':', color='#CC3311')
+
+    plt.xlabel("Tempo [s]");
+    plt.ylabel("Errore Quadratico Medio");
+    plt.axhline(0.0, color='k', linewidth=0.5, linestyle='--')
+    plt.legend();
+    plt.grid(True);
+    plt.yscale('log')
+
+    # --- Mostra tutte le figure create ---
     plt.tight_layout()
     plt.show()
-
 
 # ======================== ENTRY-POINT ========================
 if __name__ == "__main__":

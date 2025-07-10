@@ -4,21 +4,23 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="7a65ef92-ba6f-42a8-93f8-a6026a269b52" name="Changes" comment="">
-      <change afterPath="$PROJECT_DIR$/.idea/TACDMPC.iml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/inspectionProfiles/profiles_settings.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/misc.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/modules.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/vcs.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/Debug Test/test_batch_tracking.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/DifferentialMPC/__init__.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/DifferentialMPC/controller.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/DifferentialMPC/cost.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/DifferentialMPC/utils.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/examples/01_demo_linear_tracking.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/examples/02_demo_cartpole_regulation.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/examples/03_demo_unicycle_tracking.py" afterDir="false" />
+    <list default="true" id="7a65ef92-ba6f-42a8-93f8-a6026a269b52" name="Changes" comment="Version 0.01">
+      <change afterPath="$PROJECT_DIR$/ACMPC/Actor.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/ACMPC/Critic.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/ACMPC/ReplayBuffer.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/ACMPC/checkpoint.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/ACMPC/trainer.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/ActorCritic/ActorNet.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/DifferentialMPC/AugmentedLagrangianManager.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/KoopmanAutoEncodersDepracated/KoopMan.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/KoopmanAutoEncodersDepracated/koopmantest.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/examples/03_demo_cartpole_regulationAC.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/examples/KoopmanBenchMarkDeprecated.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/examples/KoopmanPreTrainingDeprecated.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/DifferentialMPC/__init__.py" beforeDir="false" afterPath="$PROJECT_DIR$/DifferentialMPC/__init__.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/examples/02_demo_cartpole_regulation.py" beforeDir="false" afterPath="$PROJECT_DIR$/examples/02_demo_cartpole_regulation.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/examples/03_demo_unicycle_tracking.py" beforeDir="false" afterPath="$PROJECT_DIR$/examples/03_demo_unicycle_tracking.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -35,9 +37,12 @@
   <component name="Git.Settings">
     <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
   </component>
-  <component name="ProjectColorInfo"><![CDATA[{
-  "associatedIndex": 5
-}]]></component>
+  <component name="ProblemsViewState">
+    <option name="selectedTabId" value="CurrentFile" />
+  </component>
+  <component name="ProjectColorInfo">{
+  &quot;associatedIndex&quot;: 5
+}</component>
   <component name="ProjectId" id="2zXOOwKuqjQfdMQ3TY15Doz0XFl" />
   <component name="ProjectLevelVcsManager">
     <ConfirmationsSetting value="2" id="Add" />
@@ -52,6 +57,14 @@
     "ModuleVcsDetector.initialDetectionPerformed": "true",
     "Python.01_demo_linear_tracking.executor": "Run",
     "Python.02_demo_cartpole_regulation.executor": "Run",
+    "Python.03_demo_unicycle_tracking.executor": "Run",
+    "Python.Actor.executor": "Run",
+    "Python.ActorCriticMPC.executor": "Run",
+    "Python.ActorNet.executor": "Run",
+    "Python.CriticTransformer.executor": "Run",
+    "Python.ReplayBuffer.executor": "Run",
+    "Python.checkpoint.executor": "Run",
+    "Python.trainer.executor": "Run",
     "RunOnceActivity.ShowReadmeOnStart": "true",
     "RunOnceActivity.git.unshallow": "true",
     "SHARE_PROJECT_CONFIGURATION_FILES": "true",
@@ -78,7 +91,20 @@
       <option name="presentableId" value="Default" />
       <updated>1751873922094</updated>
     </task>
+    <task id="LOCAL-00001" summary="Version 0.01">
+      <option name="closed" value="true" />
+      <created>1751876384859</created>
+      <option name="number" value="00001" />
+      <option name="presentableId" value="LOCAL-00001" />
+      <option name="project" value="LOCAL" />
+      <updated>1751876384859</updated>
+    </task>
+    <option name="localTasksCounter" value="2" />
     <servers />
+  </component>
+  <component name="VcsManagerConfiguration">
+    <MESSAGE value="Version 0.01" />
+    <option name="LAST_COMMIT_MESSAGE" value="Version 0.01" />
   </component>
   <component name="XDebuggerManager">
     <breakpoint-manager>
