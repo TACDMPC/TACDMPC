@@ -4,24 +4,7 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="7a65ef92-ba6f-42a8-93f8-a6026a269b52" name="Changes" comment="Version 0.01">
-      <change afterPath="$PROJECT_DIR$/ACMPC/Actor.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/ACMPC/Critic.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/ACMPC/ReplayBuffer.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/ACMPC/checkpoint.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/ACMPC/trainer.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/ActorCritic/ActorNet.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/DifferentialMPC/AugmentedLagrangianManager.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/KoopmanAutoEncodersDepracated/KoopMan.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/KoopmanAutoEncodersDepracated/koopmantest.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/examples/03_demo_cartpole_regulationAC.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/examples/KoopmanBenchMarkDeprecated.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/examples/KoopmanPreTrainingDeprecated.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/DifferentialMPC/__init__.py" beforeDir="false" afterPath="$PROJECT_DIR$/DifferentialMPC/__init__.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/examples/02_demo_cartpole_regulation.py" beforeDir="false" afterPath="$PROJECT_DIR$/examples/02_demo_cartpole_regulation.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/examples/03_demo_unicycle_tracking.py" beforeDir="false" afterPath="$PROJECT_DIR$/examples/03_demo_unicycle_tracking.py" afterDir="false" />
-    </list>
+    <list default="true" id="7a65ef92-ba6f-42a8-93f8-a6026a269b52" name="Changes" comment="Version 0.01" />
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
@@ -51,26 +34,26 @@
     <option name="hideEmptyMiddlePackages" value="true" />
     <option name="showLibraryContents" value="true" />
   </component>
-  <component name="PropertiesComponent"><![CDATA[{
-  "keyToString": {
-    "ASKED_SHARE_PROJECT_CONFIGURATION_FILES": "true",
-    "ModuleVcsDetector.initialDetectionPerformed": "true",
-    "Python.01_demo_linear_tracking.executor": "Run",
-    "Python.02_demo_cartpole_regulation.executor": "Run",
-    "Python.03_demo_unicycle_tracking.executor": "Run",
-    "Python.Actor.executor": "Run",
-    "Python.ActorCriticMPC.executor": "Run",
-    "Python.ActorNet.executor": "Run",
-    "Python.CriticTransformer.executor": "Run",
-    "Python.ReplayBuffer.executor": "Run",
-    "Python.checkpoint.executor": "Run",
-    "Python.trainer.executor": "Run",
-    "RunOnceActivity.ShowReadmeOnStart": "true",
-    "RunOnceActivity.git.unshallow": "true",
-    "SHARE_PROJECT_CONFIGURATION_FILES": "true",
-    "git-widget-placeholder": "master"
+  <component name="PropertiesComponent">{
+  &quot;keyToString&quot;: {
+    &quot;ASKED_SHARE_PROJECT_CONFIGURATION_FILES&quot;: &quot;true&quot;,
+    &quot;ModuleVcsDetector.initialDetectionPerformed&quot;: &quot;true&quot;,
+    &quot;Python.01_demo_linear_tracking.executor&quot;: &quot;Run&quot;,
+    &quot;Python.02_demo_cartpole_regulation.executor&quot;: &quot;Run&quot;,
+    &quot;Python.03_demo_unicycle_tracking.executor&quot;: &quot;Run&quot;,
+    &quot;Python.Actor.executor&quot;: &quot;Run&quot;,
+    &quot;Python.ActorCriticMPC.executor&quot;: &quot;Run&quot;,
+    &quot;Python.ActorNet.executor&quot;: &quot;Run&quot;,
+    &quot;Python.CriticTransformer.executor&quot;: &quot;Run&quot;,
+    &quot;Python.ReplayBuffer.executor&quot;: &quot;Run&quot;,
+    &quot;Python.checkpoint.executor&quot;: &quot;Run&quot;,
+    &quot;Python.trainer.executor&quot;: &quot;Run&quot;,
+    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
+    &quot;SHARE_PROJECT_CONFIGURATION_FILES&quot;: &quot;true&quot;,
+    &quot;git-widget-placeholder&quot;: &quot;master&quot;
   }
-}]]></component>
+}</component>
   <component name="RecentsManager">
     <key name="MoveFile.RECENT_KEYS">
       <recent name="$PROJECT_DIR$/DifferentialMPC" />
@@ -99,8 +82,27 @@
       <option name="project" value="LOCAL" />
       <updated>1751876384859</updated>
     </task>
-    <option name="localTasksCounter" value="2" />
+    <task id="LOCAL-00002" summary="Version 0.01">
+      <option name="closed" value="true" />
+      <created>1752164486446</created>
+      <option name="number" value="00002" />
+      <option name="presentableId" value="LOCAL-00002" />
+      <option name="project" value="LOCAL" />
+      <updated>1752164486446</updated>
+    </task>
+    <option name="localTasksCounter" value="3" />
     <servers />
+  </component>
+  <component name="Vcs.Log.Tabs.Properties">
+    <option name="TAB_STATES">
+      <map>
+        <entry key="MAIN">
+          <value>
+            <State />
+          </value>
+        </entry>
+      </map>
+    </option>
   </component>
   <component name="VcsManagerConfiguration">
     <MESSAGE value="Version 0.01" />
