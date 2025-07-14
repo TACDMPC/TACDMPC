@@ -56,7 +56,7 @@ def test_actor_grad_flow():
     # stato batch-1
     x = torch.randn(nx, device=device, requires_grad=True)
 
-    action = actor(x)                # grad through MPC + policy
+    action, _ = actor(x)             # grad through MPC + policy
 
     # fittizia loss quadratica sull'azione
     loss = (action ** 2).sum()
