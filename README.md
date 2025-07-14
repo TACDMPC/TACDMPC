@@ -8,14 +8,21 @@ Q-value from a history of states and actions.
 
 ## Installation
 
-Create a Python 3.11 environment and install the required dependencies:
+Create a Python 3.11 virtual environment and install the required
+dependencies.  The following commands use `venv` but any other virtual
+environment manager works as well:
 
 ```bash
+python3.11 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-For development and testing you can also install the optional tools defined in
-`pyproject.toml`:
+The `requirements.txt` file also installs the repository itself in editable
+mode so that the examples can import the package directly.
+
+For development and testing you can additionally install the optional tools
+defined in `pyproject.toml`:
 
 ```bash
 pip install -e .[dev]
