@@ -24,3 +24,8 @@ dev = ["pytest", "pipreqs", "black", "ruff"]
 
 [project.urls]
 Homepage = "https://github.com/<tuo_user>/TACDMPC"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["ACMPC", "ActorCritic", "DifferentialMPC"]
+exclude = ["KoopmanAutoEncodersDepracated*"]
