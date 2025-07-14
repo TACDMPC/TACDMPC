@@ -109,15 +109,8 @@ def update_step() -> None:
         return
 
     history, action, reward, next_state, done = replay_buffer.sample(BATCH_SIZE)
-    dummy_U = torch.zeros(HORIZON, NU, device=DEVICE)
     with torch.no_grad():                                              # target-path
-        next_a, next_logp = [], []
-        for s in next_state:                                           # loop finché
-            a_i, lp_i = actor.get_action(s, dummy_U)                   # get_action
-            next_a.append(a_i), next_logp.append(lp_i)                 # non è batch-safe
-        next_a     = torch.stack(next_a)                               # (B, nu)
-        next_logp  = torch.stack(next_logp).unsqueeze(1)               # (B, 1)
-
+        next_a, next_logp = actor.get_action(next_state, deterministic=False)
         next_hist  = torch.roll(history, shifts=-1, dims=1)
         next_hist[:, -1, :] = torch.cat([next_state, next_a], dim=-1)
 
@@ -137,12 +130,7 @@ def update_step() -> None:
     critic_scaler.step(critic_optimizer)
     critic_scaler.update()
     s_t = history[:, -1, :NX]                                          # (B, nx)
-    a_pi, logp_pi = [], []
-    for s in s_t:                                                      # idem, non-batch
-        a_i, lp_i = actor.get_action(s, dummy_U, deterministic=False)
-        a_pi.append(a_i), logp_pi.append(lp_i)
-    a_pi   = torch.stack(a_pi)                                         # (B, nu)
-    logp_pi = torch.stack(logp_pi).unsqueeze(1)                        # (B, 1)
+    a_pi, logp_pi = actor.get_action(s_t, deterministic=False)
     hist_pi = history.clone()
     hist_pi[:, -1, NX:] = a_pi
 
@@ -154,7 +142,7 @@ def update_step() -> None:
 
     actor_optimizer.zero_grad(set_to_none=True)
     actor_scaler.scale(actor_loss).backward()
-    torch.nn.utils.clip_grad_norm_(actor.actor_net.parameters(), 1.0)
+    torch.nn.utils.clip_grad_norm_(actor.policy_net.parameters(), 1.0)
     actor_scaler.step(actor_optimizer)
     actor_scaler.update()
 
@@ -189,11 +177,10 @@ for episode in range(start_episode, NUM_EPISODI):
 
     for t in range(MAX_STEPS_PER_EPISODIO):
         # Azione basata sullo stato corrente
-        U_init = torch.zeros(HORIZON, NU, device=DEVICE)
         # ==================== MODIFICA DI DEBUG ====================
         print(f"Ep.{episode}, Step {t}: Chiamata a actor.get_action...")
         # =========================================================
-        action, _ = actor.get_action(state, U_init, deterministic=False)
+        action, _ = actor.get_action(state, deterministic=False)
         action_np = action.detach().cpu().numpy()
         # ==================== MODIFICA DI DEBUG ====================
         print(f"Ep.{episode}, Step {t}: Azione ricevuta.")

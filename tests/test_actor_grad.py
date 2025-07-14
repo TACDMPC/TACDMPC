@@ -66,3 +66,34 @@ def test_actor_grad_flow():
     assert x.grad is not None and torch.isfinite(x.grad).all()
     grads = [p.grad for p in policy.parameters() if p.requires_grad]
     assert all(g is not None and torch.isfinite(g).all() for g in grads)
+
+
+def test_actor_grad_batch_flow():
+    torch.set_default_dtype(torch.double)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    nx = nu = 1
+    BATCH = 4
+    policy = DummyPolicy(nx, nu).to(device).double()
+    mpc = make_mpc(device)
+
+    actor = ActorMPC(
+        nx=nx,
+        policy_net=policy,
+        mpc=mpc,
+        deterministic=False,
+    ).to(device).double()
+
+    x = torch.randn(BATCH, nx, device=device, requires_grad=True)
+
+    action, logp = actor.get_action(x, deterministic=False)
+
+    assert action.shape == (BATCH, nu)
+    assert logp.shape == (BATCH, 1)
+
+    loss = (action ** 2).sum() + logp.sum()
+    loss.backward()
+
+    assert x.grad is not None and torch.isfinite(x.grad).all()
+    grads = [p.grad for p in policy.parameters() if p.requires_grad]
+    assert all(g is not None and torch.isfinite(g).all() for g in grads)
