@@ -23,14 +23,14 @@ class ILQRSolve(torch.autograd.Function):
                 U_init: torch.Tensor) -> torch.Tensor:
         u_opt, _ = controller.solve_step(x0, U_init)
         # stacca se non convergente
-        if not controller.converged and controller.detach_unconverged:
+        if (not controller.converged) and controller.detach_unconverged:
             u_opt = u_opt.detach()
 
         # tensori per backward
         ctx.controller = controller
         # Questo ora funzionerà perché self.H_last ecc. sono stati impostati da solve_step
         ctx.save_for_backward(
-            x0.detach(),
+            x0,
             controller.X_last,
             controller.U_last,
             controller.H_last[0], controller.H_last[1], controller.H_last[2],
@@ -41,30 +41,31 @@ class ILQRSolve(torch.autograd.Function):
         return u_opt
     # ------------------------------------------------------------------
     @staticmethod
-    def backward(ctx, grad_out: torch.Tensor):
-        #  recupero tensori salvati
-        (x0, Xs, Us, H_xx, H_uu, H_xu,
-         A, B, lambdas, tight_mask) = ctx.saved_tensors
-        ctrl      = ctx.controller
-        cost_mod  = ctrl.cost_module
-
-        device, dtype = grad_out.device, grad_out.dtype
-        nx, nu, T = ctrl.nx, ctrl.nu, ctrl.horizon
-        n_tau = nx + nu
-        #  gradiente
-        grad_tau_x = torch.zeros((T + 1, nx), dtype=dtype, device=device)
-        grad_tau_u = torch.zeros((T,     nu), dtype=dtype, device=device)
-        grad_tau_u[0] = grad_out
-
-        # eq8 di amos dX, dU
+    def backward(ctx, grad_u_out: torch.Tensor):
+        """
+        grad_u_out : (B, nu)  – gradiente in ingresso w.r.t. u_opt (=U[:,0])
+        Ritorna    : (grad_x0,  None,  grad_U_init)
+        """
+        (
+            x0,              # (B, nx)
+            X, U,            # rollout completi (B, T+1, nx)  (B, T, nu)
+            H_xx, H_uu, H_xu,
+            A, B_,           # dinamica linearizzata
+            lambdas,         # costates
+            tight_mask,
+        ) = ctx.saved_tensors
+        ctrl = ctx.controller
         dX, dU, _ = ctrl._zero_constrained_lqr(
-            A, B, H_xx, H_uu, H_xu,
-            grad_tau_x[:-1], grad_tau_u, tight_mask,
-            delta_u=ctrl.delta_u
+            A, B_, H_xx, H_uu, H_xu,
+            torch.zeros_like(X),           # grad_tau_x  (B,T+1,nx) – tutti zero
+            torch.cat([grad_u_out.unsqueeze(1),          # grad solo sulla prima u
+                       torch.zeros_like(U[:, 1:])], dim=1),
+            tight_mask,
+            delta_u=ctrl.delta_u,
         )
-
-        #  gradiente su x0
-        grad_x0 = dX[0]
+        grad_x0 = dX[:, 0]                 # (B, nx)
+        grad_U_init = torch.zeros_like(U)  # shape (B, T, nu)
+        return grad_x0, None, grad_U_init
 
         def _accum_grad(param: torch.Tensor, g: torch.Tensor):
             if param.grad is None:
@@ -148,7 +149,7 @@ class DifferentiableMPCController(torch.nn.Module):
             Tuple[torch.Tensor, torch.Tensor]]] = None,
             fd_eps: float = 1e-4,
             max_iter: int = 40,
-            tol_u: float = 1e-6,
+            tol_x: float = 1e-6,
             tol_u: float = 1e-6,
             exit_unconverged: bool = False,
             detach_unconverged: bool = True,
@@ -196,6 +197,12 @@ class DifferentiableMPCController(torch.nn.Module):
         self.not_improved_lim = not_improved_lim
         self.verbose = verbose
 
+        # ---------- nuovi attributi ----------
+        self.max_iter = int(max_iter)
+        self.tol_u = float(tol_u)
+        self.tol_x = float(tol_x)
+        self.detach_unconverged = bool(detach_unconverged)
+        self.converged: bool | None = None
         # Buffer per backward
         self.U_last = None
         self.X_last = None
@@ -214,7 +221,6 @@ class DifferentiableMPCController(torch.nn.Module):
         self.U_prev = None
 
     #   Calcolo Jacobiane A, B
-    @torch.no_grad()
     def _jacobian_analytic(self, x: torch.Tensor, u: torch.Tensor):
         return self.f_dyn_jac(x, u, self.dt)
 
@@ -422,7 +428,9 @@ class DifferentiableMPCController(torch.nn.Module):
         )
         self.lmb_last = lmb_last_unbatched
         self.tight_mask_last = self._compute_tight_mask(self.U_last)
-        self.converged = (not_improved < 3).all()
+        du_max = (U - U_init).abs().max()
+        dx_max = (X[:, 1:] - X[:, :-1]).abs().max()
+        self.converged = (du_max < self.tol_u) and (dx_max < self.tol_x)
         u_opt = U[:, 0]
         x_next = X[:, 1]
 
