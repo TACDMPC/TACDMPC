@@ -116,7 +116,7 @@ class ActorMPC(torch.nn.Module):
 
     # ------------------------------------------------------------------ #
     def forward(self, x: Tensor) -> Tensor:  # alias per nn.Module
-        return self.get_action(x)
+        return self.get_action(x)[0]
 
     # ------------------------------------------------------------------ #
     def _soft_clamp_log_std(self, log_std_raw: Tensor) -> Tensor:
@@ -132,31 +132,34 @@ class ActorMPC(torch.nn.Module):
         return log_std
 
     # ------------------------------------------------------------------ #
-    def get_action(self, x: Tensor) -> Tensor:
+    def get_action(self, x: Tensor, *, deterministic: bool | None = None) -> tuple[Tensor, Tensor]:
+        """Return action and log-probability for a batch of states."""
         single = x.ndim == 1
         if single:
-            x = x.unsqueeze(0)                       # (1, nx)
+            x = x.unsqueeze(0)  # (1, nx)
+
+        det = self.deterministic if deterministic is None else deterministic
 
         # 1 ─ policy network (AMP-friendly)
         with autocast(enabled=torch.is_autocast_enabled()):
-            mu, log_std_raw = self.policy_net(x)     # (B, nu) ×2
+            mu, log_std_raw = self.policy_net(x)  # (B, nu) ×2
 
         # 2 ─ soft-clamp del log-σ (gradiente sempre ≠ 0)
         log_std = self._soft_clamp_log_std(log_std_raw)
         std = log_std.exp()
 
         # 3 ─ suggerimento MPC: primo controllo ottimo
-        X_opt, U_opt = self.mpc.forward(x)           # X:(B,H+1,·) U:(B,H,nu)
-        u_mpc = U_opt[:, 0]                          # (B, nu)
+        X_opt, U_opt = self.mpc.forward(x)  # X:(B,H+1,·) U:(B,H,nu)
+        u_mpc = U_opt[:, 0]  # (B, nu)
 
         # 4 ─ composizione
-        if self.deterministic or not self.training:
-            action = mu + u_mpc
-        else:
-            dist = Normal(mu + u_mpc, std)           # reparam-trick
-            action = dist.rsample()
+        mean = mu + u_mpc
+        dist = Normal(mean, std)
+        action = mean if det or not self.training else dist.rsample()
+        log_prob = dist.log_prob(action).sum(dim=-1, keepdim=True)
 
         if single:
-            action = action.squeeze(0)               # (nu,)
+            action = action.squeeze(0)
+            log_prob = log_prob.squeeze(0)
 
-        return action
+        return action, log_prob
