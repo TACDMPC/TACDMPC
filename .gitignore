@@ -1,1 +1,15 @@
+# IDE files
 .idea/
+
+# Byte-compiled / optimized files
+__pycache__/
+*.py[cod]
+
+# Logs
+*.log
+
+# Training checkpoints
+checkpoints/
+*.ckpt
+*.tfevents*
+
