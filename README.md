@@ -1,6 +1,5 @@
 # TACDMPC
 
-[![CI](https://github.com/<user>/TACDMPC/actions/workflows/ci.yml/badge.svg)](https://github.com/<user>/TACDMPC/actions/workflows/ci.yml)
 
  **Transformer Actor–Critic with a differentiable MPC step.**
 
@@ -12,12 +11,6 @@ TACDMPC implements an Actor–Critic architecture where the policy delegates the
 2. **Critic** – Transformer encoder estimating the Q-value from past state/action pairs.
 3. **Environment** – standard Gym/Gymnasium environments.
 
-```mermaid
-flowchart LR
-    A[Actor Network] -- mean / std --> B(Diff-MPC) -- refined action --> C(Environment)
-    C -- transition --> A
-    C -- state,action history --> D[Critic Transformer]
-```
 
 ## Installation
 
