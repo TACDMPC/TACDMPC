@@ -1,11 +1,10 @@
 # diff_mpc/utils.py
 
 import torch
+from torch.func import jacrev, vmap
 from typing import Sequence, Union
 
 TensorLike = Union[torch.Tensor, Sequence[float], float]
-
-# --- Funzioni di Utilità per Tensori ---
 
 def bmv(A: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
     """Batch matrix-vector product."""
@@ -35,8 +34,34 @@ def get_state_constraints(state: torch.Tensor, x_max: float, x_min: float) -> to
     constraint2 = -state + x_min
     return torch.cat([constraint1, constraint2], dim=1)
 
+def batched_jacobian(f, x, u):
+    # vmap esterno per batch – jacrev per le var
+    def f_wrapped(xu):
+        x_, u_ = xu.split([x.shape[-1], u.shape[-1]], dim=-1)
+        return f(x_, u_)
 
-# --- Projected Newton Quadratic Programming (PNQP) Solver ---
+    xu = torch.cat([x, u], dim=-1)
+    J = vmap(jacrev(f_wrapped))(xu)
+    A, B = J.split([x.shape[-1], u.shape[-1]], dim=-1)
+    return A, B
+#fallback
+def jacobian_finite_diff_batched(f_dyn, x, u, dt, eps: float = 1e-4):
+    B, nx = x.shape
+    nu = u.shape[-1]
+    xu = torch.cat([x, u], dim=-1)                             # (B, nx+nu)
+    eye = torch.eye(nx + nu, device=x.device, dtype=x.dtype)   # (nx+nu, nx+nu)
+    perturb = eps * eye                                        # (nx+nu, nx+nu)
+    def f_xu(z):
+        x_, u_ = z[..., :nx], z[..., nx:]
+        return f_dyn(x_, u_, dt)                               # (nx,)
+    J = vmap(
+        lambda p: (f_xu(xu + p) - f_xu(xu - p)) / (2 * eps),
+        in_dims=0,
+        out_dims=0,
+    )(perturb)
+    J = J.permute(1, 2, 0)
+    A, Bm = J.split([nx, nu], dim=-1)
+    return A, Bm
 
 def pnqp(
     H: torch.Tensor,

@@ -7,18 +7,14 @@ import gym
 import os
 from contextlib import redirect_stdout
 
-# Importiamo le tue classi reali
 from DifferentialMPC import DifferentiableMPCController, GeneralQuadCost, GradMethod
-
-# --- Costanti per la policy stocastica ---
+from torch.distributions import Normal
+from torch.cuda.amp import autocast
+from torch import Tensor
 LOG_STD_MAX = 2
 LOG_STD_MIN = -20
-ACTION_SCALE = 20.0  # Scala l'output di tanh [-1, 1] alla forza reale (es. [-20, 20])
+ACTION_SCALE = 20.0
 
-
-# =============================================================================
-# 1. DEFINIZIONE DELL'AMBIENTE CARTPOLE (dal tuo script)
-# =============================================================================
 @dataclass(frozen=True)
 class CartPoleParams:
     m_c: float;
@@ -98,69 +94,69 @@ class ActorNet(nn.Module):
         return mean, log_std, cost_diagonals[..., :self.nx], cost_diagonals[..., self.nx:]
 
 
-class ActorMPC(nn.Module):
-    def __init__(self, nx: int, nu: int, horizon: int, dt: float, f_dyn, device="cpu"):
+class ActorMPC(torch.nn.Module):
+    """Actor neurale + suggerimento Differentiable MPC (grad-safe)."""
+
+    def __init__(
+        self,
+        nx: int,
+        policy_net: torch.nn.Module,
+        mpc,
+        log_std_min: float = -20.0,
+        log_std_max: float = 2.0,
+        deterministic: bool = False,
+    ) -> None:
         super().__init__()
-        self.nx, self.nu, self.horizon, self.device = nx, nu, horizon, device
-        self.actor_net = ActorNet(nx, nu).to(device)
+        self.nx = nx
+        self.policy_net = policy_net
+        self.mpc = mpc
+        self.log_std_min = float(log_std_min)
+        self.log_std_max = float(log_std_max)
+        self.deterministic = deterministic
 
-        dummy_C = torch.eye(nx + nu, device=device).repeat(horizon, 1, 1)
-        cost_module = GeneralQuadCost(nx=nx, nu=nu, C=dummy_C, c=torch.zeros_like(dummy_C[..., 0]),
-                                      C_final=dummy_C[0], c_final=torch.zeros_like(dummy_C[0, ..., 0]), device=device)
+    # ------------------------------------------------------------------ #
+    def forward(self, x: Tensor) -> Tensor:  # alias per nn.Module
+        return self.get_action(x)
 
-        self.mpc = DifferentiableMPCController(
-            f_dyn=f_dyn, cost_module=cost_module, horizon=horizon, step_size=dt,
-            grad_method=GradMethod.FINITE_DIFF, device=device, total_time=horizon * dt,
-            u_min=torch.tensor([-ACTION_SCALE]), u_max=torch.tensor([ACTION_SCALE])
+    # ------------------------------------------------------------------ #
+    def _soft_clamp_log_std(self, log_std_raw: Tensor) -> Tensor:
+        """Soft-clamp continuo e derivabile su [log_std_min, log_std_max]."""
+        # porta il valore sopra il minimo con Softplus
+        log_std = self.log_std_min + torch.nn.functional.softplus(
+            log_std_raw - self.log_std_min
         )
+        # se serve, porta anche sotto il massimo (seconda Softplus)
+        log_std = self.log_std_max - torch.nn.functional.softplus(
+            self.log_std_max - log_std
+        )
+        return log_std
 
-    def get_action(self, state: torch.Tensor, U_init: torch.Tensor, deterministic=False):
-        state = state.to(self.device)
-        state_b = state.unsqueeze(0) if state.ndim == 1 else state
+    # ------------------------------------------------------------------ #
+    def get_action(self, x: Tensor) -> Tensor:
+        single = x.ndim == 1
+        if single:
+            x = x.unsqueeze(0)                       # (1, nx)
 
-        mean, log_std, q_diag, r_diag = self.actor_net(state_b)
+        # 1 ─ policy network (AMP-friendly)
+        with autocast(enabled=torch.is_autocast_enabled()):
+            mu, log_std_raw = self.policy_net(x)     # (B, nu) ×2
 
-        Q_mat = torch.diag_embed(q_diag.squeeze(0))
-        R_mat = torch.diag_embed(r_diag.squeeze(0))
-        C_step = torch.block_diag(Q_mat, R_mat)
-        self.mpc.cost_module.C = C_step.unsqueeze(0).repeat(self.horizon, 1, 1)
-        self.mpc.cost_module.C_final = C_step * 10.0
+        # 2 ─ soft-clamp del log-σ (gradiente sempre ≠ 0)
+        log_std = self._soft_clamp_log_std(log_std_raw)
+        std = log_std.exp()
 
-        with torch.no_grad():  # Il solve dell'MPC è solo una guida, non vogliamo gradienti da qui
-            mpc_action, _ = self.mpc.solve_step(state, U_init.to(self.device))
+        # 3 ─ suggerimento MPC: primo controllo ottimo
+        X_opt, U_opt = self.mpc.forward(x)           # X:(B,H+1,·) U:(B,H,nu)
+        u_mpc = U_opt[:, 0]                          # (B, nu)
 
-        final_mean = mean.squeeze(0) + mpc_action.detach()
-        std = log_std.exp().squeeze(0)
-        policy_dist = Normal(final_mean, std)
+        # 4 ─ composizione
+        if self.deterministic or not self.training:
+            action = mu + u_mpc
+        else:
+            dist = Normal(mu + u_mpc, std)           # reparam-trick
+            action = dist.rsample()
 
-        action_sample = final_mean if deterministic else policy_dist.rsample()
-        log_prob = policy_dist.log_prob(action_sample).sum(axis=-1)
+        if single:
+            action = action.squeeze(0)               # (nu,)
 
-        action_tanh = torch.tanh(action_sample)
-        log_prob -= torch.log(1 - action_tanh.pow(2) + 1e-6).sum(axis=-1)
-
-        # Scala l'azione all'intervallo fisico del sistema
-        final_action = action_tanh * ACTION_SCALE
-
-        return final_action, log_prob
-
-
-# --- Sanity Check ---
-if __name__ == '__main__':
-    torch.set_default_dtype(torch.float64)
-    env = CartPoleEnv(device="cpu")
-    state = env.reset()
-
-    actor = ActorMPC(nx=4, nu=1, horizon=15, dt=env.dt, f_dyn=env.dyn_func, device="cpu")
-
-    U_init = torch.zeros(15, 1)
-    action, log_p = actor.get_action(state, U_init)
-
-    print("Sanity Check Step 4.1")
-    print(f"Stato iniziale: {state.numpy()}")
-    print(f"Azione campionata: {action.detach().numpy()}")
-    print(f"Log Probabilità: {log_p.item()}")
-
-    assert action.shape == (1,)
-    assert log_p.ndim == 0
-    print("\n✅ Sanity check superato. L'ambiente e l'attore sono pronti.")
+        return action

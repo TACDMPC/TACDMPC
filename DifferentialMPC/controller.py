@@ -21,18 +21,7 @@ class ILQRSolve(torch.autograd.Function):
                 x0: torch.Tensor,
                 controller: 'DifferentiableMPCController',
                 U_init: torch.Tensor) -> torch.Tensor:
-        """
-        x0      : (nx,)       stato corrente
-        U_init  : (T,nu)      warm‐start per il solver
-        """
-        # risolvo iLQR con warm‐start
-        with torch.no_grad():
-            # --- MODIFICA CRUCIALE QUI ---
-            # Spacchettiamo l'output di solve_step. Prendiamo solo u_opt
-            # e ignoriamo x_next con la variabile placeholder "_"
-            u_opt, _ = controller.solve_step(x0.detach(), U_init.detach())
-            # --- FINE MODIFICA ---
-
+        u_opt, _ = controller.solve_step(x0, U_init)
         # stacca se non convergente
         if not controller.converged and controller.detach_unconverged:
             u_opt = u_opt.detach()
@@ -420,22 +409,17 @@ class DifferentiableMPCController(torch.nn.Module):
             not_improved = torch.where(improved, torch.zeros_like(not_improved), not_improved + 1)
             if (not_improved >= 3).all(): break
 
-        # --- BLOCCO CRUCIALE PER LA DIFFERENZIAZIONE ---
-        # 6) Calcola e salva le variabili di diagnostica per il backward pass
-        self.X_last = X.detach()
-        self.U_last = U.detach()
-        self.H_last = (l_xx.detach(), l_uu.detach(), l_xu.detach())
-        self.F_last = (A_batch.detach(), B_batch.detach())
+        self.X_last = X
+        self.U_last = U
+        self.H_last = (l_xx, l_uu, l_xu)
+        self.F_last = (A_batch, B_batch)
         # Calcola i costati (adjoints) necessari per i gradienti della dinamica
         lmb_last_unbatched = self.compute_costates(
             A_batch[0], B_batch[0], l_x[0], l_xN[0]
         )
-        self.lmb_last = lmb_last_unbatched.detach()
-        self.tight_mask_last = self._compute_tight_mask(self.U_last).detach()
+        self.lmb_last = lmb_last_unbatched
+        self.tight_mask_last = self._compute_tight_mask(self.U_last)
         self.converged = (not_improved < 3).all()
-        # --- FINE BLOCCO CRUCIALE ---
-
-        # 7) Estrai comandi ottimali e stato successivo
         u_opt = U[:, 0]
         x_next = X[:, 1]
 
@@ -478,7 +462,7 @@ class DifferentiableMPCController(torch.nn.Module):
         X_new, U_new = vmap(_forward_single, in_dims=(0, 0, 0, 0, 0))(x0, X_ref, U_ref, K, k)
         return X_new, U_new
 
-    @torch.no_grad()
+
     def rollout_trajectory(
             self,
             x0: torch.Tensor,  # (B, nx)  **oppure** (nx,) per retro-compatibilità
@@ -565,6 +549,7 @@ class DifferentiableMPCController(torch.nn.Module):
         return l_x, l_u, l_xx, l_xu, l_uu, l_xN, l_xxN
 
     # -----------------------------------------------------------------
+    """
     def linearize_dynamics_old(self, X: torch.Tensor, U: torch.Tensor):
         A_list, B_list = [], []
         for t in range(self.horizon):
@@ -579,28 +564,35 @@ class DifferentiableMPCController(torch.nn.Module):
             A_list.append(A_t)
             B_list.append(B_t)
         return torch.stack(A_list), torch.stack(B_list)
-
-    def linearize_dynamics(self, X: Tensor, U: Tensor):
-        """
-        X : (B, T+1, nx)
-        U : (B, T,   nu)
-        →  A : (B, T, nx, nx)
-           B : (B, T, nx, nu)
-        """
+    """
+    def linearize_dynamics(self, X: torch.Tensor, U: torch.Tensor):
         assert X.ndim == 3 and U.ndim == 3
-        f = lambda x, u: self.f_dyn(x, u, self.dt)  # (nx,)→(nx,)
+        f = lambda x, u: self.f_dyn(x, u, self.dt)
+        try:
+            jac_x = jacrev(f, argnums=0)
+            jac_u = jacrev(f, argnums=1)
 
-        # Jacobiani scalari
-        jac_x = jacrev(f, argnums=0)
-        jac_u = jacrev(f, argnums=1)
+            # vmap(time) ∘ vmap(batch)
+            A = vmap(vmap(jac_x, in_dims=(0, 0)), in_dims=(0, 0))(X[:, :-1], U)
+            B = vmap(vmap(jac_u, in_dims=(0, 0)), in_dims=(0, 0))(X[:, :-1], U)
 
-        # vmap su (time) e su (batch) in cascata
-        #   in_dims=(0,0) → x: (T, nx)  u:(T,nu)
-        #   secondo vmap   → batch (B, …)
-        A = vmap(vmap(jac_x, in_dims=(0, 0)), in_dims=(0, 0))(X[:, :-1], U)
-        B = vmap(vmap(jac_u, in_dims=(0, 0)), in_dims=(0, 0))(X[:, :-1], U)
-        return A, B
-
+            return A, B
+        except RuntimeError as err:
+            if self.debug:
+                logging.warning(
+                    "[linearize_dynamics] autograd-vmap failed – "
+                    "switching to finite-diff.  Msg: %s", err)
+            # X[:-1] perché l’ultima X è X_{T}
+            A, B = jacobian_finite_diff_batched(
+                self.f_dyn, X[:, :-1].reshape(-1, self.nx),  # (B·T, nx)
+                U.reshape(-1, self.nu),  # (B·T, nu)
+                dt=self.dt
+            )
+            # ri-shape per rimettere batch e tempo
+            B_, T = X.shape[0], U.shape[1]
+            A = A.reshape(B_, T, self.nx, self.nx)
+            B = B.reshape(B_, T, self.nx, self.nu)
+            return A, B
     # ------------------------------------------------------------------
     def backward_lqr(
             self,

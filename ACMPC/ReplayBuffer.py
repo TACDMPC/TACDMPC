@@ -31,10 +31,10 @@ class SequenceReplayBuffer:
         done_batch = []
 
         for idx in batch_indices:
-            # Estrai la sequenza di `history_len` transizioni
+            # Estrai la sequenza di `history_len`
             sequence = [self.buffer[j] for j in range(idx - self.history_len + 1, idx + 1)]
 
-            # Costruisci la storia (input per il critico)
+            # input per il critico)
             history_states = np.array([s[0] for s in sequence])
             history_actions = np.array([s[1] for s in sequence])
             history = np.concatenate([history_states, history_actions], axis=1)
@@ -46,8 +46,6 @@ class SequenceReplayBuffer:
             reward_batch.append([current_r])
             next_state_batch.append(next_s)
             done_batch.append([current_d])
-
-        # Converte le liste di numpy array in tensori PyTorch sul dispositivo corretto
         return (
             torch.tensor(np.array(history_batch), dtype=torch.float64, device=self.device),
             torch.tensor(np.array(action_batch), dtype=torch.float64, device=self.device),

@@ -57,12 +57,6 @@ class CriticTransformer(nn.Module):
         """
         Esegue il forward pass del critico.
 
-        Args:
-            history (torch.Tensor): Tensore contenente la sequenza di stati e azioni.
-                                    Shape: (B, history_len, nx + nu)
-
-        Returns:
-            torch.Tensor: Il Q-value stimato, shape (B, 1).
         """
         # Proietta l'input nella dimensione del modello
         embedded = self.input_embedding(history)
@@ -84,7 +78,7 @@ class CriticTransformer(nn.Module):
 
 class PositionalEncoding(nn.Module):
     """
-    Helper class per il Positional Encoding, un componente standard dei Transformer.
+    Helper class per il Positional Encoding
     Preso dalla documentazione ufficiale di PyTorch.
     """
 

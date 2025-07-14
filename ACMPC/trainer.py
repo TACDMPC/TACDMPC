@@ -14,10 +14,8 @@ from Actor import ActorMPC
 from Critic import CriticTransformer
 from ReplayBuffer import SequenceReplayBuffer
 from checkpoint import save_checkpoint, load_checkpoint
-
-# =============================================================================
-# 2. DEFINIZIONE DELL'AMBIENTE (dal tuo script di esempio)
-# =============================================================================
+from torch.cuda.amp import autocast, GradScaler
+import torch.nn.functional as F
 ACTION_SCALE = 20.0 # Scala l'output di tanh [-1, 1] alla forza reale
 
 @dataclass(frozen=True)
@@ -87,8 +85,7 @@ critic_target_1.load_state_dict(critic_1.state_dict())
 critic_target_2.load_state_dict(critic_2.state_dict())
 actor.to(DEVICE); critic_1.to(DEVICE); critic_2.to(DEVICE)
 critic_target_1.to(DEVICE); critic_target_2.to(DEVICE)
-
-actor_optimizer = optim.Adam(actor.actor_net.parameters(), lr=LR_ACTOR)
+actor_optimizer = optim.Adam(actor.parameters(), lr=LR_ACTOR, weight_decay=1e-4)
 critic_optimizer = optim.Adam(list(critic_1.parameters()) + list(critic_2.parameters()), lr=LR_CRITIC)
 log_alpha = torch.zeros(1, requires_grad=True, device=DEVICE)
 alpha_optimizer = optim.Adam([log_alpha], lr=LR_ALPHA)
@@ -97,81 +94,83 @@ alpha = log_alpha.exp().item()
 replay_buffer = SequenceReplayBuffer(BUFFER_SIZE, HISTORY_LEN, NX, NU, DEVICE)
 start_episode = load_checkpoint(actor, critic_1, critic_2, actor_optimizer, critic_optimizer, "checkpoint.pth", DEVICE)
 
+# --------------------------- AMP helpers ------------------------------------
+from torch.cuda.amp import autocast, GradScaler
+import torch.nn.functional as F                                     # noqa: E402
 
-# =============================================================================
-# 2. FUNZIONE DI AGGIORNAMENTO (SENZA PLACEHOLDER)
-# =============================================================================
-def update_step():
-    # --- CORREZIONE QUI ---
-    # Dichiara che 'alpha' si riferisce alla variabile globale
+# scaler inizializzati una-tantum (fuori dal training-loop)
+critic_scaler: GradScaler = GradScaler(enabled=DEVICE.startswith("cuda"))
+actor_scaler:  GradScaler = GradScaler(enabled=DEVICE.startswith("cuda"))
+
+# ---------------------------------------------------------------------------
+def update_step() -> None:
     global alpha
-
     if len(replay_buffer) < BATCH_SIZE + HISTORY_LEN:
         return
 
     history, action, reward, next_state, done = replay_buffer.sample(BATCH_SIZE)
+    dummy_U = torch.zeros(HORIZON, NU, device=DEVICE)
+    with torch.no_grad():                                              # target-path
+        next_a, next_logp = [], []
+        for s in next_state:                                           # loop finché
+            a_i, lp_i = actor.get_action(s, dummy_U)                   # get_action
+            next_a.append(a_i), next_logp.append(lp_i)                 # non è batch-safe
+        next_a     = torch.stack(next_a)                               # (B, nu)
+        next_logp  = torch.stack(next_logp).unsqueeze(1)               # (B, 1)
 
-    # --- AGGIORNAMENTO CRITICI ---
-    with torch.no_grad():
-        U_init_dummy = torch.zeros(HORIZON, NU, device=DEVICE)
-        next_actions_dist, next_log_probs = [], []
+        next_hist  = torch.roll(history, shifts=-1, dims=1)
+        next_hist[:, -1, :] = torch.cat([next_state, next_a], dim=-1)
 
-        # Calcoliamo le prossime azioni e log_probs per l'intero batch
-        for i in range(BATCH_SIZE):
-            na, nlp = actor.get_action(next_state[i], U_init_dummy)
-            next_actions_dist.append(na)
-            next_log_probs.append(nlp)
+        q_t1 = critic_target_1(next_hist)
+        q_t2 = critic_target_2(next_hist)
+        q_target = reward + GAMMA * (1.0 - done) * (torch.min(q_t1, q_t2) - alpha * next_logp)
 
-        next_actions = torch.stack(next_actions_dist)
-        next_log_probs = torch.stack(next_log_probs).unsqueeze(1)
+    with autocast(enabled=DEVICE.startswith("cuda")):                  # mixed-precision
+        q1 = critic_1(history)
+        q2 = critic_2(history)
+        critic_loss = F.mse_loss(q1, q_target) + F.mse_loss(q2, q_target)
 
-        next_history = torch.roll(history, shifts=-1, dims=1)
-        next_history[:, -1, :] = torch.cat([next_state, next_actions], dim=-1)
+    critic_optimizer.zero_grad(set_to_none=True)
+    critic_scaler.scale(critic_loss).backward()
+    torch.nn.utils.clip_grad_norm_(critic_1.parameters(), 1.0)
+    torch.nn.utils.clip_grad_norm_(critic_2.parameters(), 1.0)
+    critic_scaler.step(critic_optimizer)
+    critic_scaler.update()
+    s_t = history[:, -1, :NX]                                          # (B, nx)
+    a_pi, logp_pi = [], []
+    for s in s_t:                                                      # idem, non-batch
+        a_i, lp_i = actor.get_action(s, dummy_U, deterministic=False)
+        a_pi.append(a_i), logp_pi.append(lp_i)
+    a_pi   = torch.stack(a_pi)                                         # (B, nu)
+    logp_pi = torch.stack(logp_pi).unsqueeze(1)                        # (B, 1)
+    hist_pi = history.clone()
+    hist_pi[:, -1, NX:] = a_pi
 
-        q_target1 = critic_target_1(next_history)
-        q_target2 = critic_target_2(next_history)
-        q_target_min = torch.min(q_target1, q_target2)
-        q_target = reward + GAMMA * (1.0 - done) * (q_target_min - alpha * next_log_probs)
+    with autocast(enabled=DEVICE.startswith("cuda")):
+        q1_pi = critic_1(hist_pi)
+        q2_pi = critic_2(hist_pi)
+        q_pi  = torch.min(q1_pi, q2_pi)
+        actor_loss = (alpha * logp_pi - q_pi).mean()
 
-    q_current1 = critic_1(history)
-    q_current2 = critic_2(history)
-    critic_loss = nn.MSELoss()(q_current1, q_target) + nn.MSELoss()(q_current2, q_target)
+    actor_optimizer.zero_grad(set_to_none=True)
+    actor_scaler.scale(actor_loss).backward()
+    torch.nn.utils.clip_grad_norm_(actor.actor_net.parameters(), 1.0)
+    actor_scaler.step(actor_optimizer)
+    actor_scaler.update()
 
-    critic_optimizer.zero_grad()
-    critic_loss.backward()
-    critic_optimizer.step()
-
-    # --- AGGIORNAMENTO ATTORE E ALPHA ---
-    # Ricostruiamo lo stato corrente dall'ultimo elemento della storia
-    current_state_from_history = history[:, -1, :NX]
-    actions_pred, log_probs_pred = [], []
-    for i in range(BATCH_SIZE):
-        ap, lpp = actor.get_action(current_state_from_history[i], U_init_dummy)
-        actions_pred.append(ap)
-        log_probs_pred.append(lpp)
-    log_probs_pred = torch.stack(log_probs_pred).unsqueeze(1)
-
-    q_actor1 = critic_1(history).detach()
-    q_actor2 = critic_2(history).detach()
-    actor_loss = (alpha * log_probs_pred - torch.min(q_actor1, q_actor2)).mean()
-
-    actor_optimizer.zero_grad()
-    actor_loss.backward()
-    actor_optimizer.step()
-
-    # Aggiornamento alpha
-    alpha_loss = -(log_alpha * (log_probs_pred.detach() + TARGET_ENTROPY)).mean()
-    alpha_optimizer.zero_grad()
+    # ============================================================ temperature
+    alpha_loss = -(log_alpha * (logp_pi.detach() + TARGET_ENTROPY)).mean()
+    alpha_optimizer.zero_grad(set_to_none=True)
     alpha_loss.backward()
     alpha_optimizer.step()
-    alpha = log_alpha.exp().item()
+    alpha = log_alpha.exp().item()                                     # sync
 
-    # --- AGGIORNAMENTO RETI TARGET ---
+    # ============================================================ soft-update
     with torch.no_grad():
-        for target_param, param in zip(critic_target_1.parameters(), critic_1.parameters()):
-            target_param.data.copy_(TAU * param.data + (1.0 - TAU) * target_param.data)
-        for target_param, param in zip(critic_target_2.parameters(), critic_2.parameters()):
-            target_param.data.copy_(TAU * param.data + (1.0 - TAU) * target_param.data)
+        for tgt, src in zip(critic_target_1.parameters(), critic_1.parameters()):
+            tgt.data.lerp_(src.data, TAU)
+        for tgt, src in zip(critic_target_2.parameters(), critic_2.parameters()):
+            tgt.data.lerp_(src.data, TAU)
 
 
 # =============================================================================
