@@ -3,13 +3,12 @@
 
  **Transformer Actor–Critic with a differentiable MPC step.**
 
-TACDMPC implements an Actor–Critic architecture where the policy delegates the first control action to a differentiable Model Predictive Controller.  Unlike the original paper that employs an MLP critic, here the critic is a small Transformer that processes a short history of states and actions.
+TACDMPC implements an Actor–Critic architecture where the policy operates in order to optimize the OCP weights and delegates the first control action to a differentiable Model Predictive Controller.  Unlike the original paper that employs an MLP critic, here the critic is a small Transformer that processes a short history of states and actions.
 
 ## Overview
 
-1. **Actor** – predicts a mean action and covariance; a Differentiable MPC module refines the first action.
+1. **Actor** – operates on matrix weight of the DMPC in order to optimize them
 2. **Critic** – Transformer encoder estimating the Q-value from past state/action pairs.
-3. **Environment** – standard Gym/Gymnasium environments.
 
 
 ## Installation
