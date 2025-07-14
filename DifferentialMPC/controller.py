@@ -42,73 +42,61 @@ class ILQRSolve(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_u_out: torch.Tensor):
         """
-        Parameters
-        ----------
-        grad_u_out : Tensor  shape (B, nu)
-            Gradiente in ingresso rispetto all'output `u_opt`
-            (tipicamente proviene da dℒ/du).
-
-        Returns
-        -------
-        grad_x0      : Tensor (B, nx)      –  ∂ℒ/∂x0
-        None         : placeholder per 'controller'
-        grad_U_init  : Tensor (B, T, nu)   –  opzionale; qui restituiamo zeri
+        grad_u_out : (B, nu)  – dℒ/du_opt in ingresso.
         """
         (
-            x0,               # (B, nx)
-            Xs, Us,           # (B, T+1, nx) , (B, T, nu)
-            H_xx, H_uu, H_xu, # (B, T, nx, nx) , (B, T, nu, nu) , (B, T, nx, nu)
-            A, Bm,            # (B, T, nx, nx) , (B, T, nx, nu)
-            lambdas,          # (B, T+1, nx)
-            tight_mask,       # (B, T, nu)
+            _x0,
+            _Xs, Us,                     # Us serve solo per shape di grad_U_init
+            H_xx, H_uu, H_xu,
+            A,  Bm,
+            _lmb,
+            tight_mask,
         ) = ctx.saved_tensors
+        ctrl = ctx.controller
 
-        ctrl: "DifferentiableMPCController" = ctx.controller
-        B_batch, T, nx = Xs.shape[0], Xs.shape[1] - 1, ctrl.nx
-        nu             = ctrl.nu
-        device, dtype  = grad_u_out.device, grad_u_out.dtype
+        B, T, nx, nu = A.shape[0], A.shape[1], ctrl.nx, ctrl.nu
+        device, dtype = A.device, A.dtype
 
-        # ------------------------------------------------------------------
-        # helper che esegue il backward LQR per un singolo elemento batch
-        # ------------------------------------------------------------------
-        def _lqr_single(a, b, h_xx, h_uu, h_xu, mask):
-            # grad_tau_x = 0  ;  grad_tau_u = [grad_u_out ; 0 … 0]
+        grad_x0_list = []
+
+        # ------------------------------------------------------------------ #
+        # loop esplicito sul batch (niente vmap -> ok control-flow dinamico)  #
+        # ------------------------------------------------------------------ #
+        for i in range(B):
+            # 1. Costruisci gradiente su τ_u: solo sul primo comando
             grad_tau_u = torch.cat(
-                [grad_u_out_single.unsqueeze(0),
-                 torch.zeros(T-1, nu, dtype=dtype, device=device)],
+                [grad_u_out[i].unsqueeze(0),
+                 torch.zeros(T - 1, nu, dtype=dtype, device=device)],
                 dim=0
             )
-            dX, dU, _ = ctrl._zero_constrained_lqr(
-                a, b, h_xx, h_uu, h_xu,
-                torch.zeros(T+1, nx, dtype=dtype, device=device),  # grad_tau_x = 0
+
+            # 2. Patch temporaneo di U_last (shape (T,nu) attesa dallo solver)
+            U_last_orig = ctrl.U_last
+            if U_last_orig.ndim == 3:           # (B, T, nu)
+                ctrl.U_last = U_last_orig[i]    # (T, nu)
+
+            # 3. Backward LQR singolo batch
+            dX, _, _ = ctrl._zero_constrained_lqr(
+                A[i], Bm[i],
+                H_xx[i], H_uu[i], H_xu[i],
+                torch.zeros(T + 1, nx, dtype=dtype, device=device),  # grad τ_x = 0
                 grad_tau_u,
-                mask,
+                tight_mask[i],
                 delta_u=ctrl.delta_u,
             )
-            return dX[0]   # restituiamo ∂ℒ/∂x0 per quel batch
 
-        # ------------------------------------------------------------------
-        # Batch singolo → più veloce senza vmap
-        # ------------------------------------------------------------------
-        if B_batch == 1:
-            grad_u_out_single = grad_u_out[0]
-            grad_x0 = _lqr_single(
-                A[0], Bm[0], H_xx[0], H_uu[0], H_xu[0], tight_mask[0]
-            ).unsqueeze(0)           # ripristina dim B=1
-        # ------------------------------------------------------------------
-        # Batch > 1 → usa torch.vmap per parallellizzare
-        # ------------------------------------------------------------------
-        else:
-            grad_x0 = torch.vmap(_lqr_single)(
-                A, Bm, H_xx, H_uu, H_xu, tight_mask
-            )
+            grad_x0_list.append(dX[0])          # ∂ℒ/∂x0 per questo batch
 
-        # ------------------------------------------------------------------
-        # Gradiente rispetto a U_init – qui non lo usiamo: restituiamo zero
-        # ------------------------------------------------------------------
-        grad_U_init = torch.zeros_like(Us)
+            # 4. Ripristina U_last originale
+            ctrl.U_last = U_last_orig
 
-        # Ritorna nell'ordine degli input di forward: (x0, controller, U_init)
+        # ------------------------------------------------------------------ #
+        # Aggrega risultati e restituisci                                    #
+        # ------------------------------------------------------------------ #
+        grad_x0 = torch.stack(grad_x0_list, dim=0)       # (B, nx)
+        grad_U_init = torch.zeros_like(Us)               # non ottimizziamo U_init
+
+        # ordine: grad_x0, grad_controller(None), grad_U_init
         return grad_x0, None, grad_U_init
 
 # ─────────────────────────────────────────────────────────────
