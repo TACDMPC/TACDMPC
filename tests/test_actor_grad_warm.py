@@ -67,10 +67,10 @@ def test_actor_grad_flow_warm():
     x = torch.randn(nx, device=device, requires_grad=True)
 
     # ── Primo passaggio: serve solo a riempire U_prev per warm-start ──
-    _ = actor(x)
+    _ , _ = actor(x)
 
     # ── Secondo passaggio (con warm-start) ──
-    action = actor(x)
+    action, _ = actor(x)
 
     # Loss fittizia
     loss = (action ** 2).sum()
