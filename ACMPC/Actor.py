@@ -115,8 +115,13 @@ class ActorMPC(torch.nn.Module):
         self.deterministic = deterministic
 
     # ------------------------------------------------------------------ #
-    def forward(self, x: Tensor) -> Tensor:  # alias per nn.Module
-        return self.get_action(x)
+    def forward(
+        self,
+        x: Tensor,
+        U_init: Tensor | None = None,
+        deterministic: bool | None = None,
+    ) -> tuple[Tensor, Tensor]:  # alias per nn.Module
+        return self.get_action(x, U_init=U_init, deterministic=deterministic)
 
     # ------------------------------------------------------------------ #
     def _soft_clamp_log_std(self, log_std_raw: Tensor) -> Tensor:
@@ -132,10 +137,17 @@ class ActorMPC(torch.nn.Module):
         return log_std
 
     # ------------------------------------------------------------------ #
-    def get_action(self, x: Tensor) -> Tensor:
+    def get_action(
+        self,
+        x: Tensor,
+        U_init: Tensor | None = None,
+        deterministic: bool | None = None,
+    ) -> tuple[Tensor, Tensor]:
         single = x.ndim == 1
         if single:
             x = x.unsqueeze(0)                       # (1, nx)
+
+        B = x.shape[0]
 
         # 1 ─ policy network (AMP-friendly)
         with autocast(enabled=torch.is_autocast_enabled()):
@@ -146,17 +158,29 @@ class ActorMPC(torch.nn.Module):
         std = log_std.exp()
 
         # 3 ─ suggerimento MPC: primo controllo ottimo
-        X_opt, U_opt = self.mpc.forward(x)           # X:(B,H+1,·) U:(B,H,nu)
-        u_mpc = U_opt[:, 0]                          # (B, nu)
+        if U_init is None:
+            U_init = torch.zeros(B, self.mpc.horizon, self.mpc.nu,
+                                 device=x.device, dtype=x.dtype)
+        else:
+            if U_init.ndim == 2:
+                U_init = U_init.unsqueeze(0)
+            if U_init.shape[0] != B:
+                U_init = U_init.expand(B, -1, -1)
+
+        u_mpc, _ = self.mpc.solve_step(x, U_init)    # (B, nu)
 
         # 4 ─ composizione
-        if self.deterministic or not self.training:
+        det = self.deterministic if deterministic is None else deterministic
+        dist = Normal(mu + u_mpc, std)
+        if det or not self.training:
             action = mu + u_mpc
         else:
-            dist = Normal(mu + u_mpc, std)           # reparam-trick
-            action = dist.rsample()
+            action = dist.rsample()                  # reparam-trick
+
+        log_prob = dist.log_prob(action).sum(dim=-1)
 
         if single:
             action = action.squeeze(0)               # (nu,)
+            log_prob = log_prob.squeeze(0)
 
-        return action
+        return action, log_prob
