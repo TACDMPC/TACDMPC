@@ -4,9 +4,8 @@ from typing import Callable, Optional, Tuple, Dict
 import torch
 from torch import Tensor
 from torch.func import vmap, jacrev
-from .cost import GeneralQuadCost
 from .utils import pnqp
-
+from .cost import GeneralQuadCost
 try:
     from torch.func import scan
     _HAS_SCAN = True
@@ -43,78 +42,74 @@ class ILQRSolve(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_u_out: torch.Tensor):
         """
-        grad_u_out : (B, nu)  – gradiente in ingresso w.r.t. u_opt (=U[:,0])
-        Ritorna    : (grad_x0,  None,  grad_U_init)
+        Parameters
+        ----------
+        grad_u_out : Tensor  shape (B, nu)
+            Gradiente in ingresso rispetto all'output `u_opt`
+            (tipicamente proviene da dℒ/du).
+
+        Returns
+        -------
+        grad_x0      : Tensor (B, nx)      –  ∂ℒ/∂x0
+        None         : placeholder per 'controller'
+        grad_U_init  : Tensor (B, T, nu)   –  opzionale; qui restituiamo zeri
         """
         (
-            x0,              # (B, nx)
-            X, U,            # rollout completi (B, T+1, nx)  (B, T, nu)
-            H_xx, H_uu, H_xu,
-            A, B_,           # dinamica linearizzata
-            lambdas,         # costates
-            tight_mask,
+            x0,               # (B, nx)
+            Xs, Us,           # (B, T+1, nx) , (B, T, nu)
+            H_xx, H_uu, H_xu, # (B, T, nx, nx) , (B, T, nu, nu) , (B, T, nx, nu)
+            A, Bm,            # (B, T, nx, nx) , (B, T, nx, nu)
+            lambdas,          # (B, T+1, nx)
+            tight_mask,       # (B, T, nu)
         ) = ctx.saved_tensors
-        ctrl = ctx.controller
-        dX, dU, _ = ctrl._zero_constrained_lqr(
-            A, B_, H_xx, H_uu, H_xu,
-            torch.zeros_like(X),           # grad_tau_x  (B,T+1,nx) – tutti zero
-            torch.cat([grad_u_out.unsqueeze(1),          # grad solo sulla prima u
-                       torch.zeros_like(U[:, 1:])], dim=1),
-            tight_mask,
-            delta_u=ctrl.delta_u,
-        )
-        grad_x0 = dX[:, 0]                 # (B, nx)
-        grad_U_init = torch.zeros_like(U)  # shape (B, T, nu)
+
+        ctrl: "DifferentiableMPCController" = ctx.controller
+        B_batch, T, nx = Xs.shape[0], Xs.shape[1] - 1, ctrl.nx
+        nu             = ctrl.nu
+        device, dtype  = grad_u_out.device, grad_u_out.dtype
+
+        # ------------------------------------------------------------------
+        # helper che esegue il backward LQR per un singolo elemento batch
+        # ------------------------------------------------------------------
+        def _lqr_single(a, b, h_xx, h_uu, h_xu, mask):
+            # grad_tau_x = 0  ;  grad_tau_u = [grad_u_out ; 0 … 0]
+            grad_tau_u = torch.cat(
+                [grad_u_out_single.unsqueeze(0),
+                 torch.zeros(T-1, nu, dtype=dtype, device=device)],
+                dim=0
+            )
+            dX, dU, _ = ctrl._zero_constrained_lqr(
+                a, b, h_xx, h_uu, h_xu,
+                torch.zeros(T+1, nx, dtype=dtype, device=device),  # grad_tau_x = 0
+                grad_tau_u,
+                mask,
+                delta_u=ctrl.delta_u,
+            )
+            return dX[0]   # restituiamo ∂ℒ/∂x0 per quel batch
+
+        # ------------------------------------------------------------------
+        # Batch singolo → più veloce senza vmap
+        # ------------------------------------------------------------------
+        if B_batch == 1:
+            grad_u_out_single = grad_u_out[0]
+            grad_x0 = _lqr_single(
+                A[0], Bm[0], H_xx[0], H_uu[0], H_xu[0], tight_mask[0]
+            ).unsqueeze(0)           # ripristina dim B=1
+        # ------------------------------------------------------------------
+        # Batch > 1 → usa torch.vmap per parallellizzare
+        # ------------------------------------------------------------------
+        else:
+            grad_x0 = torch.vmap(_lqr_single)(
+                A, Bm, H_xx, H_uu, H_xu, tight_mask
+            )
+
+        # ------------------------------------------------------------------
+        # Gradiente rispetto a U_init – qui non lo usiamo: restituiamo zero
+        # ------------------------------------------------------------------
+        grad_U_init = torch.zeros_like(Us)
+
+        # Ritorna nell'ordine degli input di forward: (x0, controller, U_init)
         return grad_x0, None, grad_U_init
-
-        def _accum_grad(param: torch.Tensor, g: torch.Tensor):
-            if param.grad is None:
-                param.grad = g.clone()
-            else:
-                param.grad += g
-
-        if cost_mod.C.requires_grad:
-            gC = torch.zeros_like(cost_mod.C)     # [T, ntau, ntau]
-            gc = torch.zeros_like(cost_mod.c)     # [T, ntau]
-
-            for t in range(T):
-                tau_t  = torch.cat((Xs[t],  Us[t]))      # [ntau]
-                dtau_t = torch.cat((dX[t],  dU[t]))      # [ntau]
-                gC[t] = 0.5 * (torch.outer(dtau_t, tau_t) +
-                               torch.outer(tau_t, dtau_t))
-                gc[t] = dtau_t
-
-            # terminale
-            tauN   = torch.cat((Xs[-1],
-                                torch.zeros(nu, device=device, dtype=dtype)))
-            dtauN  = torch.cat((dX[-1],
-                                torch.zeros(nu, device=device, dtype=dtype)))
-            gCf = 0.5 * (torch.outer(dtauN, tauN) + torch.outer(tauN, dtauN))
-            gcf = dtauN
-
-            _accum_grad(cost_mod.C,        gC)
-            _accum_grad(cost_mod.c,        gc)
-            _accum_grad(cost_mod.C_final,  gCf)
-            _accum_grad(cost_mod.c_final,  gcf)
-
-        #  gradienti  A, B (solo se leaf Parameter)
-        if A.requires_grad or B.requires_grad:
-            gA = torch.zeros_like(A)   # [T, nx, nx]
-            gB = torch.zeros_like(B)   # [T, nx, nu]
-            for t in range(T):
-                tau_t  = torch.cat((Xs[t], Us[t]))        # [ntau]
-                dtau_t = torch.cat((dX[t], dU[t]))        # [ntau]
-                dF_t = (torch.outer(lambdas[t+1], tau_t) +
-                        torch.outer(A[t].T @ dX[t+1] + B[t].T @ dU[t], dtau_t))
-                gA[t] = dF_t[:, :nx]
-                gB[t] = dF_t[:, nx:]
-
-            _accum_grad(A, gA)
-            _accum_grad(B, gB)
-
-        # ritorna gradiente rispetto a x0; None per arg. non‑tensor ─
-        return grad_x0, None, None   # grad wrt x0 / controller / U_init
-
 
 # ─────────────────────────────────────────────────────────────
 class GradMethod(enum.Enum):
@@ -264,14 +259,6 @@ class DifferentiableMPCController(torch.nn.Module):
         B = torch.cat(B_cols, dim=-1)  # [nx, nu]
         return A, B
 
-    ################################################################################
-    # Sostituisci il metodo forward nella tua classe DifferentiableMPCController con questo
-
-    # Sostituisci il metodo 'forward' e 'tracking_mpc' con questo unico metodo.
-    # Se vuoi mantenere il forward differenziabile originale, puoi rinominare questo
-    # in, ad esempio, 'run_simulation' e modificare il test per chiamare quello.
-    # Ma per far funzionare il test attuale, il metodo __call__ (ovvero forward) deve essere questo.
-
     def forward(
             self,
             x0: torch.Tensor,
@@ -305,22 +292,23 @@ class DifferentiableMPCController(torch.nn.Module):
 
         # 3) Ciclo di controllo MPC in anello chiuso
         for t in range(self.N_sim):
-            # Estrai la finestra di riferimenti per l'orizzonte corrente
-            x_ref_window = x_ref_full[:, t: t + H + 1, :] if x_ref_full is not None else None
-            u_ref_window = u_ref_full[:, t: t + H, :] if u_ref_full is not None else None
-
-            # Risolvi il problema MPC per trovare il controllo ottimale
-            u_opt, _ = self.solve_step(
-                x_current, U_init,
-                x_ref_batch=x_ref_window, u_ref_batch=u_ref_window
+            x_ref_window = (
+                x_ref_full[:, t: t + H + 1, :] if x_ref_full is not None else None
             )
-            us_list.append(u_opt)
+            u_ref_window = (
+                u_ref_full[:, t: t + H, :] if u_ref_full is not None else None
+            )
 
-            # Applica il controllo alla dinamica REALE per ottenere lo stato successivo
+            # Aggiorna i riferimenti nel modulo costi
+            if x_ref_window is not None or u_ref_window is not None:
+                self.cost_module.set_reference(
+                    x_ref=x_ref_window,
+                    u_ref=u_ref_window,
+                )
+            u_opt = ILQRSolve.apply(x_current, self, U_init)
+            us_list.append(u_opt)
             x_current = self.f_dyn(x_current, u_opt, self.dt)
             xs_list.append(x_current)
-
-            # Prepara il warm-start per la prossima iterazione
             self.U_prev = self.U_last
             if self.U_last is not None:
                 U_init = torch.roll(self.U_last, shifts=-1, dims=1)
