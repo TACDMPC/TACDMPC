@@ -6,13 +6,25 @@ from tqdm import trange
 
 from DifferentialMPC import DifferentiableMPCController, GeneralQuadCost
 from ACMPC import ActorMPC, CriticTransformer, training_loop
-from utils import seed_everything
+from importlib import util as import_util
+from pathlib import Path
+
+try:
+    from utils import seed_everything  # type: ignore
+except Exception:
+    spec = import_util.spec_from_file_location(
+        "utils_module", Path(__file__).resolve().parents[1] / "utils.py"
+    )
+    _mod = import_util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(_mod)
+    seed_everything = _mod.seed_everything
 
 
 def f_dyn_linear(x: torch.Tensor, u: torch.Tensor, dt: float) -> torch.Tensor:
     A = torch.tensor([[1.0, dt], [0.0, 1.0]], dtype=x.dtype, device=x.device)
     B = torch.tensor([[0.0], [dt]], dtype=x.dtype, device=x.device)
-    return torch.einsum("...ij,...j->...i", A, x) + torch.einsum("...ij,...j->..i", B, u)
+    return torch.einsum("...ij,...j->...i", A, x) + torch.einsum("...ij,...j->...i", B, u)
 
 
 class DoubleIntegratorEnv:
@@ -26,9 +38,10 @@ class DoubleIntegratorEnv:
         self.state = None
 
     def _reference(self, step: int) -> torch.Tensor:
-        pos = 2.0 * torch.sin(0.5 * step * self.dt)
-        vel = 2.0 * 0.5 * torch.cos(0.5 * step * self.dt)
-        return torch.tensor([pos, vel], device=self.device, dtype=torch.double)
+        t = torch.tensor(step * self.dt, dtype=torch.double, device=self.device)
+        pos = 2.0 * torch.sin(0.5 * t)
+        vel = 2.0 * 0.5 * torch.cos(0.5 * t)
+        return torch.stack([pos, vel])
 
     def reset(self) -> torch.Tensor:
         self.t = 0
@@ -89,18 +102,27 @@ def run_baseline(env: DoubleIntegratorEnv, horizon: int = 20, N_sim: int = 200):
 def train_ac(env: DoubleIntegratorEnv, steps: int = 1000, horizon: int = 20):
     nx, nu = 2, 1
     device = env.device
-    policy = nn.Sequential(
-        nn.Linear(nx, 64),
-        nn.Tanh(),
-        nn.Linear(64, 2 * nu),
-    )
+    class Policy(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.net = nn.Sequential(
+                nn.Linear(nx, 64),
+                nn.Tanh(),
+                nn.Linear(64, 2 * nu),
+            )
+
+        def forward(self, x: torch.Tensor):
+            mu, log_std_raw = self.net(x).chunk(2, dim=-1)
+            return mu, log_std_raw
+
+    policy = Policy()
     actor = ActorMPC(nx, nu, horizon=horizon, dt=env.dt, f_dyn=f_dyn_linear, policy_net=policy, device=str(device))
     critic = CriticTransformer(nx, nu, history_len=1, pred_horizon=1)
     actor.double(); critic.double()
     rewards = []
     q_grads = []
     for _ in trange(steps, desc="training", leave=False):
-        training_loop.train(env, actor, critic, steps=1, seed=0)
+        training_loop.train(env, actor, critic, steps=1)
         with torch.no_grad():
             q_grad = actor.q_raw.grad.abs().mean().item() if actor.q_raw.grad is not None else 0.0
         q_grads.append(q_grad)

@@ -25,6 +25,12 @@ pip install -e .[dev,examples]
 
 The main runtime requirements are `torch`, `gymnasium`/`gym`, `numpy`, `tqdm` and `transformers`.  Optional extras provide `pytest`, `ruff`, `black` and `matplotlib` for plotting the demos.
 
+To run the plotting examples make sure the `examples` extra is installed:
+
+```bash
+pip install -e .[examples]
+```
+
 
 ## Running the examples
 
