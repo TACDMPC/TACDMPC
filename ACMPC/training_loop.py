@@ -34,6 +34,7 @@ def train(
     critic: CriticTransformer,
     steps: int = 100,
     *,
+    use_amp: bool = False,
     profile: bool = False,
     log_file: str | None = None,
     track_gpu: bool = False,
@@ -41,8 +42,11 @@ def train(
 
     actor_opt = optim.Adam(actor.parameters(), lr=3e-4)
     critic_opt = optim.Adam(critic.parameters(), lr=3e-4)
+    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
 
     for _ in range(steps):
+        with torch.cuda.amp.autocast(enabled=use_amp):
+
         ctx = (
             Profiler(
                 log_file=log_file,
@@ -73,10 +77,17 @@ def train(
             actor_loss = -advantages
             critic_loss = advantages.pow(2)
 
-            actor_opt.zero_grad()
+        actor_opt.zero_grad()
+        critic_opt.zero_grad()
+
+        if use_amp:
+            scaler.scale(actor_loss).backward(retain_graph=True)
+            scaler.scale(critic_loss).backward()
+            scaler.step(actor_opt)
+            scaler.step(critic_opt)
+            scaler.update()
+        else:
             actor_loss.backward(retain_graph=True)
+            critic_loss.backward()
             actor_opt.step()
 
-            critic_opt.zero_grad()
-            critic_loss.backward()
-            critic_opt.step()
