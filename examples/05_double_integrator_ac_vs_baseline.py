@@ -116,9 +116,18 @@ def train_ac(env: DoubleIntegratorEnv, steps: int = 1000, horizon: int = 20):
             return mu, log_std_raw
 
     policy = Policy()
-    actor = ActorMPC(nx, nu, horizon=horizon, dt=env.dt, f_dyn=f_dyn_linear, policy_net=policy, device=str(device))
+    actor = ActorMPC(
+        nx,
+        nu,
+        horizon=horizon,
+        dt=env.dt,
+        f_dyn=f_dyn_linear,
+        policy_net=policy,
+        device=str(device),
+    )
     critic = CriticTransformer(nx, nu, history_len=1, pred_horizon=1)
-    actor.double(); critic.double()
+    actor.double()
+    critic.double()
     rewards = []
     q_grads = []
     for _ in trange(steps, desc="training", leave=False):
@@ -162,14 +171,15 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     env = DoubleIntegratorEnv(device=device)
 
-    print("Running baseline MPC...")
-    rmse_baseline, traj_b, ref_b = run_baseline(env)
-    print(f"Baseline RMSE: {rmse_baseline:.3f} m")
-
     print("\nTraining actor-critic MPC...")
     actor, rewards, q_grads = train_ac(env, steps=100)
     rmse_mean, rmse_std, traj_ac, ref_ac = evaluate_actor(env, actor)
     print(f"Actor-Critic RMSE: {rmse_mean:.3f} ± {rmse_std:.3f} m")
+
+    print("\nRunning baseline MPC...")
+    env_baseline = DoubleIntegratorEnv(device=device)
+    rmse_baseline, traj_b, ref_b = run_baseline(env_baseline)
+    print(f"Baseline RMSE: {rmse_baseline:.3f} m")
 
     plt.figure(figsize=(10, 4))
     plt.subplot(1, 2, 1)
