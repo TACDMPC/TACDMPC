@@ -24,24 +24,7 @@ from .critic_transformer import CriticTransformer
 
 
 def rollout(env, actor: ActorMPC, horizon: int):
-    states = []
-    actions = []
-    rewards = []
-    state = env.reset()
-    for _ in range(horizon):
-        action, _ = actor(state)
-        next_state, reward, done = env.step(action)
-        states.append(state)
-        actions.append(action)
-        rewards.append(torch.tensor([reward], dtype=torch.float32, device=state.device))
-        state = next_state
-        if done:
-            state = env.reset()
-    return torch.stack(states), torch.stack(actions), torch.stack(rewards)
-
-
-def _rollout_with_logprobs(env, actor: ActorMPC, horizon: int):
-    """Rollout policy collecting log probabilities."""
+    """Rollout policy returning log probabilities."""
     states = []
     actions = []
     rewards = []
@@ -63,6 +46,24 @@ def _rollout_with_logprobs(env, actor: ActorMPC, horizon: int):
         torch.stack(rewards),
         torch.stack(log_probs),
     )
+
+
+def compute_gae_and_returns(
+    rewards: torch.Tensor,
+    values: torch.Tensor,
+    *,
+    gamma: float = 0.99,
+    lam: float = 1.0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compute advantages and returns using GAE."""
+    T = rewards.shape[0]
+    returns = torch.zeros_like(rewards)
+    next_return = 0.0
+    for t in reversed(range(T)):
+        next_return = rewards[t] + gamma * next_return
+        returns[t] = next_return
+    advantages = returns - values
+    return advantages, returns
 
 
 def train(
@@ -97,15 +98,9 @@ def train(
                 else nullcontext()
             )
             with ctx:
-                states, actions, rewards, log_probs = _rollout_with_logprobs(
-                    env, actor, horizon=10
-                )
+                states, actions, rewards, log_probs = rollout(env, actor, horizon=10)
 
-                returns = rewards.flip(0).cumsum(0).flip(0).squeeze(-1)
-
-                pred = torch.zeros(
-                    1, critic.pred_horizon, actor.nx + actor.nu, device=states.device
-                )
+                rewards_flat = rewards.squeeze(-1)
 
                 states_detached = states.detach()
                 actions_detached = actions.detach()
@@ -126,12 +121,11 @@ def train(
                         states_detached[t].unsqueeze(0),
                         actions_detached[t].unsqueeze(0),
                         hist.unsqueeze(0),
-                        pred,
                     )
                     values.append(value.squeeze(0))
                 values = torch.stack(values)
 
-                advantages = returns - values
+                advantages, returns = compute_gae_and_returns(rewards_flat, values, gamma=1.0, lam=1.0)
 
                 actor_loss = -(log_probs * advantages.detach()).mean()
                 critic_loss = torch.nn.functional.mse_loss(values, returns)

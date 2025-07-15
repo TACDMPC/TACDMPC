@@ -39,9 +39,17 @@ class CriticTransformer(nn.Module):
         current_state: torch.Tensor,
         current_action: torch.Tensor,
         history: torch.Tensor,
-        predicted: torch.Tensor,
+        predicted: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Return Q-value for given trajectory pieces."""
+        if predicted is None:
+            predicted = torch.zeros(
+                current_state.shape[0],
+                self.pred_horizon,
+                self.token_dim,
+                device=current_state.device,
+                dtype=current_state.dtype,
+            )
         seq = torch.cat(
             [history, torch.cat([current_state, current_action], dim=-1).unsqueeze(1), predicted],
             dim=1,
