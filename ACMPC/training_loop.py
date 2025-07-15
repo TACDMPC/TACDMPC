@@ -40,6 +40,31 @@ def rollout(env, actor: ActorMPC, horizon: int):
     return torch.stack(states), torch.stack(actions), torch.stack(rewards)
 
 
+def _rollout_with_logprobs(env, actor: ActorMPC, horizon: int):
+    """Rollout policy collecting log probabilities."""
+    states = []
+    actions = []
+    rewards = []
+    log_probs = []
+    state = env.reset()
+    for _ in range(horizon):
+        action, log_prob = actor(state)
+        next_state, reward, done = env.step(action)
+        states.append(state)
+        actions.append(action)
+        rewards.append(torch.tensor([reward], dtype=state.dtype, device=state.device))
+        log_probs.append(log_prob)
+        state = next_state
+        if done:
+            state = env.reset()
+    return (
+        torch.stack(states),
+        torch.stack(actions),
+        torch.stack(rewards),
+        torch.stack(log_probs),
+    )
+
+
 def train(
     env,
     actor: ActorMPC,
@@ -72,39 +97,56 @@ def train(
                 else nullcontext()
             )
             with ctx:
-                states, actions, rewards = rollout(env, actor, horizon=10)
-                # simple cumulative reward
-                returns = rewards.flip(0).cumsum(0).flip(0)
-                critic_in_hist = torch.zeros(
-                    1, critic.history_len, actor.nx + actor.nu, device=states.device
+                states, actions, rewards, log_probs = _rollout_with_logprobs(
+                    env, actor, horizon=10
                 )
+
+                returns = rewards.flip(0).cumsum(0).flip(0).squeeze(-1)
+
                 pred = torch.zeros(
                     1, critic.pred_horizon, actor.nx + actor.nu, device=states.device
                 )
-                values = critic(
-                    states[-1].unsqueeze(0),
-                    actions[-1].unsqueeze(0),
-                    critic_in_hist,
-                    pred,
-                )
-                advantages = returns.sum() - values
 
-                actor_loss = -advantages
-                critic_loss = advantages.pow(2)
+                states_detached = states.detach()
+                actions_detached = actions.detach()
+                tokens = torch.cat([states_detached, actions_detached], dim=-1)
+                values = []
+                for t in range(states.shape[0]):
+                    start = max(0, t - critic.history_len)
+                    hist = torch.zeros(
+                        critic.history_len,
+                        actor.nx + actor.nu,
+                        device=states.device,
+                        dtype=states.dtype,
+                    )
+                    hist_slice = tokens[start:t]
+                    if hist_slice.numel() > 0:
+                        hist[-hist_slice.shape[0] :] = hist_slice
+                    value = critic(
+                        states_detached[t].unsqueeze(0),
+                        actions_detached[t].unsqueeze(0),
+                        hist.unsqueeze(0),
+                        pred,
+                    )
+                    values.append(value.squeeze(0))
+                values = torch.stack(values)
+
+                advantages = returns - values
+
+                actor_loss = -(log_probs * advantages.detach()).mean()
+                critic_loss = torch.nn.functional.mse_loss(values, returns)
 
         actor_opt.zero_grad()
         critic_opt.zero_grad()
 
         if use_amp:
-            scaler.scale(actor_loss).backward(retain_graph=True)
+            scaler.scale(actor_loss).backward()
             scaler.scale(critic_loss).backward()
             scaler.step(actor_opt)
             scaler.step(critic_opt)
             scaler.update()
         else:
-            actor_loss.backward(retain_graph=True)
+            actor_loss.backward()
             critic_loss.backward()
             actor_opt.step()
             critic_opt.step()
-
-
