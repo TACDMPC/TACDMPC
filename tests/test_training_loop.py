@@ -37,21 +37,19 @@ class TinyEnv:
 
 
 def compute_loss(env, actor, critic):
-    states, actions, rewards = training_loop.rollout(env, actor, horizon=5)
-    returns = rewards.flip(0).cumsum(0).flip(0)
+    states, actions, rewards, _ = training_loop.rollout(env, actor, horizon=5)
+    returns = training_loop.compute_gae_and_returns(rewards.squeeze(-1), torch.zeros(rewards.shape[0]))[1]
     hist = torch.zeros(1, critic.history_len, actor.nx + actor.nu)
-    pred = torch.zeros(1, critic.pred_horizon, actor.nx + actor.nu)
-    value = critic(states[-1].unsqueeze(0), actions[-1].unsqueeze(0), hist, pred)
+    value = critic(states[-1].unsqueeze(0), actions[-1].unsqueeze(0), hist)
     adv = returns.sum() - value
     return (-adv + adv.pow(2)).item()
 
 
 def _train_step(env, actor, critic, opt_a, opt_c):
-    states, actions, rewards = training_loop.rollout(env, actor, horizon=5)
-    returns = rewards.flip(0).cumsum(0).flip(0)
+    states, actions, rewards, _ = training_loop.rollout(env, actor, horizon=5)
+    returns = training_loop.compute_gae_and_returns(rewards.squeeze(-1), torch.zeros(rewards.shape[0]))[1]
     hist = torch.zeros(1, critic.history_len, actor.nx + actor.nu)
-    pred = torch.zeros(1, critic.pred_horizon, actor.nx + actor.nu)
-    value = critic(states[-1].unsqueeze(0), actions[-1].unsqueeze(0), hist, pred)
+    value = critic(states[-1].unsqueeze(0), actions[-1].unsqueeze(0), hist)
     adv = returns.sum() - value
 
     actor_loss = -adv
