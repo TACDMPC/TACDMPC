@@ -7,7 +7,12 @@ from DifferentialMPC.cost import GeneralQuadCost
 
 
 class ActorMPC(nn.Module):
-    """Differentiable MPC actor with learnable Q and R diagonals."""
+    """Differentiable MPC actor with learnable ``Q`` and ``R`` diagonals.
+
+    Parameters are stored as raw values and passed through ``softplus`` to keep
+    the cost matrices positive definite. The class exposes a :meth:`reset`
+    helper to clear the warm start of the underlying MPC solver.
+    """
 
     def __init__(
         self,
@@ -54,6 +59,11 @@ class ActorMPC(nn.Module):
             device=device,
         )
         self.U_prev: Tensor | None = None
+
+    # ------------------------------------------------------------------
+    def reset(self) -> None:
+        """Clear the stored warm start control sequence."""
+        self.U_prev = None
 
     # ------------------------------------------------------------------
     def _softplus_diag(self, raw: Tensor) -> Tensor:
