@@ -1,10 +1,17 @@
 from __future__ import annotations
 import enum
+import logging
 from typing import Callable, Optional, Tuple, Dict
 import torch
 from torch import Tensor
-from torch.func import vmap, jacrev
-from .utils import pnqp
+from torch.func import jacrev
+try:
+    from torch.func import vmap as _vmap
+    _HAS_VMAP = True
+except ImportError:
+    _HAS_VMAP = False
+    _vmap = None
+from .utils import pnqp, jacobian_finite_diff_batched
 from .cost import GeneralQuadCost
 try:
     from torch.func import scan
@@ -362,7 +369,7 @@ class DifferentiableMPCController(torch.nn.Module):
         if B > 1 and u_ref_b.shape[0] == 1: u_ref_b = u_ref_b.expand(B, -1, -1)
 
         cost_fn = lambda Xi, Ui, xr, ur: self.cost_module.objective(Xi, Ui, x_ref_override=xr, u_ref_override=ur).sum()
-        best_cost = vmap(cost_fn)(X, U, x_ref_b, u_ref_b) if B > 1 else cost_fn(X, U, x_ref_b, u_ref_b)
+        best_cost = _vmap(cost_fn)(X, U, x_ref_b, u_ref_b) if B > 1 else cost_fn(X, U, x_ref_b, u_ref_b)
         not_improved = torch.zeros(B, dtype=torch.int64, device=self.device)
 
         # 5) Loop ILQR
@@ -377,11 +384,11 @@ class DifferentiableMPCController(torch.nn.Module):
                 K0, k0 = _bwd(A_batch[0], B_batch[0], l_x[0], l_u[0], l_xx[0], l_xu[0], l_uu[0], l_xN[0], l_xxN[0])
                 K, k = K0.unsqueeze(0), k0.unsqueeze(0)
             else:
-                K, k = vmap(_bwd)(A_batch, B_batch, l_x, l_u, l_xx, l_xu, l_uu, l_xN, l_xxN)
+                K, k = _vmap(_bwd)(A_batch, B_batch, l_x, l_u, l_xx, l_xu, l_uu, l_xN, l_xxN)
 
             X_new, U_new = self.forward_pass_batched(x0, X, U, K, k)
 
-            new_cost = vmap(cost_fn)(X_new, U_new, x_ref_b, u_ref_b) if B > 1 else cost_fn(X_new, U_new, x_ref_b,
+            new_cost = _vmap(cost_fn)(X_new, U_new, x_ref_b, u_ref_b) if B > 1 else cost_fn(X_new, U_new, x_ref_b,
                                                                                            u_ref_b)
             improved = new_cost < best_cost
             is_scalar = improved.ndim == 0
@@ -446,7 +453,7 @@ class DifferentiableMPCController(torch.nn.Module):
             return torch.stack(xs, dim=0), torch.stack(us, dim=0)
 
         # Vettorizza la funzione di forward pass sul batch
-        X_new, U_new = vmap(_forward_single, in_dims=(0, 0, 0, 0, 0))(x0, X_ref, U_ref, K, k)
+        X_new, U_new = _vmap(_forward_single, in_dims=(0, 0, 0, 0, 0))(x0, X_ref, U_ref, K, k)
         return X_new, U_new
 
 
@@ -518,7 +525,7 @@ class DifferentiableMPCController(torch.nn.Module):
             )
 
             # Passa i batch di traiettorie e riferimenti a vmap
-            l_tau, H_tau, lN, HN = vmap(_quad_fn)(X, U, x_ref_b, u_ref_b)
+            l_tau, H_tau, lN, HN = _vmap(_quad_fn)(X, U, x_ref_b, u_ref_b)
             # --- FINE MODIFICA ---
         else:
             # Il caso unbatched chiama direttamente la funzione (che userà self.x_ref)
@@ -559,9 +566,9 @@ class DifferentiableMPCController(torch.nn.Module):
             jac_x = jacrev(f, argnums=0)
             jac_u = jacrev(f, argnums=1)
 
-            # vmap(time) ∘ vmap(batch)
-            A = vmap(vmap(jac_x, in_dims=(0, 0)), in_dims=(0, 0))(X[:, :-1], U)
-            B = vmap(vmap(jac_u, in_dims=(0, 0)), in_dims=(0, 0))(X[:, :-1], U)
+            # _vmap(time) ∘ _vmap(batch)
+            A = _vmap(_vmap(jac_x, in_dims=(0, 0)), in_dims=(0, 0))(X[:, :-1], U)
+            B = _vmap(_vmap(jac_u, in_dims=(0, 0)), in_dims=(0, 0))(X[:, :-1], U)
 
             return A, B
         except RuntimeError as err:
@@ -723,7 +730,7 @@ class DifferentiableMPCController(torch.nn.Module):
         X_batch[:, 0] = x0
         #  funzione dinamica in batch
         if _HAS_VMAP:
-            f_dyn_batched = vmap(lambda x, u: self.f_dyn(x, u, self.dt))
+            f_dyn_batched = _vmap(lambda x, u: self.f_dyn(x, u, self.dt))
         else:  # fallback: con loop >_>
             def f_dyn_batched(x, u):
                 return torch.stack([self.f_dyn(x[i], u[i], self.dt)
