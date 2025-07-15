@@ -3,7 +3,7 @@
 import torch
 import torch.optim as optim
 from contextlib import nullcontext
-from importlib import import_module, util as import_util
+from importlib import util as import_util
 from pathlib import Path
 from utils.profiler import Profiler
 
@@ -23,25 +23,28 @@ from .actor import ActorMPC
 from .critic_transformer import CriticTransformer
 
 
+def compute_gae_and_returns(
+    rewards: torch.Tensor,
+    values: torch.Tensor,
+    last_value: torch.Tensor,
+    *,
+    gamma: float = 0.99,
+    lam: float = 0.95,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compute generalized advantage estimation and returns."""
+    gae = 0.0
+    advantages = torch.zeros_like(rewards)
+    for t in reversed(range(rewards.shape[0])):
+        next_value = last_value if t == rewards.shape[0] - 1 else values[t + 1]
+        delta = rewards[t] + gamma * next_value - values[t]
+        gae = delta + gamma * lam * gae
+        advantages[t] = gae
+    returns = advantages + values
+    return advantages, returns
+
+
 def rollout(env, actor: ActorMPC, horizon: int):
-    states = []
-    actions = []
-    rewards = []
-    state = env.reset()
-    for _ in range(horizon):
-        action, _ = actor(state)
-        next_state, reward, done = env.step(action)
-        states.append(state)
-        actions.append(action)
-        rewards.append(torch.tensor([reward], dtype=torch.float32, device=state.device))
-        state = next_state
-        if done:
-            state = env.reset()
-    return torch.stack(states), torch.stack(actions), torch.stack(rewards)
-
-
-def _rollout_with_logprobs(env, actor: ActorMPC, horizon: int):
-    """Rollout policy collecting log probabilities."""
+    """Rollout policy collecting log probabilities and final state."""
     states = []
     actions = []
     rewards = []
@@ -52,7 +55,7 @@ def _rollout_with_logprobs(env, actor: ActorMPC, horizon: int):
         next_state, reward, done = env.step(action)
         states.append(state)
         actions.append(action)
-        rewards.append(torch.tensor([reward], dtype=state.dtype, device=state.device))
+        rewards.append(torch.tensor([reward], dtype=torch.float32, device=state.device))
         log_probs.append(log_prob)
         state = next_state
         if done:
@@ -62,6 +65,7 @@ def _rollout_with_logprobs(env, actor: ActorMPC, horizon: int):
         torch.stack(actions),
         torch.stack(rewards),
         torch.stack(log_probs),
+        state,
     )
 
 
@@ -97,11 +101,9 @@ def train(
                 else nullcontext()
             )
             with ctx:
-                states, actions, rewards, log_probs = _rollout_with_logprobs(
+                states, actions, rewards, log_probs, final_state = rollout(
                     env, actor, horizon=10
                 )
-
-                returns = rewards.flip(0).cumsum(0).flip(0).squeeze(-1)
 
                 pred = torch.zeros(
                     1, critic.pred_horizon, actor.nx + actor.nu, device=states.device
@@ -131,7 +133,27 @@ def train(
                     values.append(value.squeeze(0))
                 values = torch.stack(values)
 
-                advantages = returns - values
+                hist = torch.zeros(
+                    critic.history_len,
+                    actor.nx + actor.nu,
+                    device=states.device,
+                    dtype=states.dtype,
+                )
+                hist_slice = tokens[-critic.history_len :]
+                if hist_slice.numel() > 0:
+                    hist[-hist_slice.shape[0] :] = hist_slice
+                with torch.no_grad():
+                    final_action, _ = actor(final_state)
+                last_value = critic(
+                    final_state.detach().unsqueeze(0),
+                    final_action.detach().unsqueeze(0),
+                    hist.unsqueeze(0),
+                    pred,
+                ).squeeze(0)
+
+                advantages, returns = compute_gae_and_returns(
+                    rewards.squeeze(-1), values, last_value
+                )
 
                 actor_loss = -(log_probs * advantages.detach()).mean()
                 critic_loss = torch.nn.functional.mse_loss(values, returns)

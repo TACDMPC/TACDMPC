@@ -37,7 +37,7 @@ class TinyEnv:
 
 
 def compute_loss(env, actor, critic):
-    states, actions, rewards = training_loop.rollout(env, actor, horizon=5)
+    states, actions, rewards, _, _ = training_loop.rollout(env, actor, horizon=5)
     returns = rewards.flip(0).cumsum(0).flip(0)
     hist = torch.zeros(1, critic.history_len, actor.nx + actor.nu)
     pred = torch.zeros(1, critic.pred_horizon, actor.nx + actor.nu)
@@ -47,7 +47,7 @@ def compute_loss(env, actor, critic):
 
 
 def _train_step(env, actor, critic, opt_a, opt_c):
-    states, actions, rewards = training_loop.rollout(env, actor, horizon=5)
+    states, actions, rewards, _, _ = training_loop.rollout(env, actor, horizon=5)
     returns = rewards.flip(0).cumsum(0).flip(0)
     hist = torch.zeros(1, critic.history_len, actor.nx + actor.nu)
     pred = torch.zeros(1, critic.pred_horizon, actor.nx + actor.nu)
