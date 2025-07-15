@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import gym
 import os
 from contextlib import redirect_stdout
+from utils import seed_everything
 from DifferentialMPC import DifferentiableMPCController, GeneralQuadCost, GradMethod
 
 LOG_STD_MAX = 2
@@ -144,6 +145,7 @@ class ActorMPC(nn.Module):
 
 # --- Sanity Check ---
 if __name__ == '__main__':
+    seed_everything(0)
     torch.set_default_dtype(torch.float64)
     env = CartPoleEnv(device="cpu")
     state = env.reset()

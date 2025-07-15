@@ -3,6 +3,7 @@ import time
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
+from utils import seed_everything
 
 # Importa le classi principali dal pacchetto
 from DifferentialMPC import DifferentiableMPCController, GeneralQuadCost
@@ -43,6 +44,7 @@ def f_dyn_jac_unicycle(state: torch.Tensor, control: torch.Tensor, dt: float) ->
 
 # ======================== ROUTINE PRINCIPALE ========================
 def main():
+    seed_everything(0)
     # --- Configurazione Globale ---
     torch.set_default_dtype(torch.double)
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")

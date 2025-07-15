@@ -2,9 +2,10 @@
 
 import torch
 import torch.optim as optim
+from utils import seed_everything
 from contextlib import nullcontext
-
 from utils.profiler import Profiler
+
 
 from .actor import ActorMPC
 from .critic_transformer import CriticTransformer
@@ -37,6 +38,7 @@ def train(
     log_file: str | None = None,
     track_gpu: bool = False,
 ):
+
     actor_opt = optim.Adam(actor.parameters(), lr=3e-4)
     critic_opt = optim.Adam(critic.parameters(), lr=3e-4)
 
