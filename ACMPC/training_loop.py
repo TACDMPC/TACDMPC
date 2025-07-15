@@ -1,6 +1,7 @@
 """Minimal PPO training loop for ActorMPC and CriticTransformer."""
 import torch
 import torch.optim as optim
+from utils import seed_everything
 
 from .actor import ActorMPC
 from .critic_transformer import CriticTransformer
@@ -23,7 +24,8 @@ def rollout(env, actor: ActorMPC, horizon: int):
     return torch.stack(states), torch.stack(actions), torch.stack(rewards)
 
 
-def train(env, actor: ActorMPC, critic: CriticTransformer, steps: int = 100):
+def train(env, actor: ActorMPC, critic: CriticTransformer, steps: int = 100, seed: int = 0):
+    seed_everything(seed)
     actor_opt = optim.Adam(actor.parameters(), lr=3e-4)
     critic_opt = optim.Adam(critic.parameters(), lr=3e-4)
 

@@ -6,6 +6,7 @@ from tqdm import trange
 
 from DifferentialMPC import DifferentiableMPCController, GeneralQuadCost
 from ACMPC import ActorMPC, CriticTransformer, training_loop
+from utils import seed_everything
 
 
 def f_dyn_linear(x: torch.Tensor, u: torch.Tensor, dt: float) -> torch.Tensor:
@@ -99,7 +100,7 @@ def train_ac(env: DoubleIntegratorEnv, steps: int = 1000, horizon: int = 20):
     rewards = []
     q_grads = []
     for _ in trange(steps, desc="training", leave=False):
-        training_loop.train(env, actor, critic, steps=1)
+        training_loop.train(env, actor, critic, steps=1, seed=0)
         with torch.no_grad():
             q_grad = actor.q_raw.grad.abs().mean().item() if actor.q_raw.grad is not None else 0.0
         q_grads.append(q_grad)
@@ -134,6 +135,7 @@ def evaluate_actor(env: DoubleIntegratorEnv, actor: ActorMPC, episodes: int = 20
 
 
 def main():
+    seed_everything(0)
     torch.set_default_dtype(torch.double)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     env = DoubleIntegratorEnv(device=device)

@@ -42,6 +42,13 @@ Alternatively a convenience entry point is installed:
 ac-mpc-examples 03_demo_cartpole_regulationAC
 ```
 
+## Reproducibility
+
+A helper `utils.seed_everything(seed)` seeds Python's `random`, NumPy and
+PyTorch for deterministic runs. All example scripts and the training loop call
+this function with seed `0` by default. Pass a different value to vary the
+random initialization.
+
 ## Testing
 
 After installing the development extras simply run:
