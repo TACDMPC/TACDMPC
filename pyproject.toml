@@ -3,24 +3,54 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name            = "tacdmpc"
-version         = "0.1.0"
-description     = "Differentiable MPC with Actor-Critic integration"
-readme          = "README.md"
-license         = {file = "Private"}
-requires-python = ">=3.9"
+name = "tacdmpc"
+version = "0.2.0"
+description = "Actor–Critic with differentiable MPC and Transformer critic"
+authors = [{name = "TACDMPC Team"}]
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.11"
 
 # dipendenze runtime minime
 dependencies = [
-  "torch>=2.2",     
+  "torch>=2.2",
+  "gym>=0.26",
+  "gymnasium>=1.2",
   "numpy>=1.24",
-  "gymnasium>=0.28",
   "tqdm>=4.66"
 ]
 
 # dipendenze extra (sviluppo, test, ecc.)
 [project.optional-dependencies]
-dev = ["pytest", "pipreqs", "black", "ruff"]
+dev = [
+  "pytest>=7.4",
+  "ruff>=0.3",
+  "black>=24.0",
+  "pipreqs"
+]
+examples = ["matplotlib>=3.8"]
+
+[project.scripts]
+ac-mpc-examples = "examples.__main__:cli"
 
 [project.urls]
 Homepage = "https://github.com/<tuo_user>/TACDMPC"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["ACMPC", "ActorCritic", "DifferentialMPC"]
+exclude = ["KoopmanAutoEncodersDepracated*"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["ACMPC", "ActorCritic", "DifferentialMPC"]
+
+[tool.ruff]
+line-length = 88
+
+[tool.black]
+line-length = 88

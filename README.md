@@ -1,51 +1,50 @@
 # TACDMPC
 
-Transformer Actor–Critic framework that integrates a differentiable Model
-Predictive Controller (MPC) inside the policy network.  The actor predicts a
-distribution over actions while a differentiable MPC module refines the first
-control input.  The critic is built around a Transformer that estimates the
-Q-value from a history of states and actions.
+
+ **Transformer Actor–Critic with a differentiable MPC step.**
+
+TACDMPC implements an Actor–Critic architecture where the policy operates in order to optimize the OCP weights and delegates the first control action to a differentiable Model Predictive Controller.  Unlike the original paper that employs an MLP critic, here the critic is a small Transformer that processes a short history of states and actions.
+
+## Overview
+
+1. **Actor** – operates on matrix weight of the DMPC in order to optimize them
+2. **Critic** – Transformer encoder estimating the Q-value from past state/action pairs.
+
 
 ## Installation
 
-Create a Python 3.11 environment and install the required dependencies:
+Create a Python ≥3.11 environment and install the package with optional extras for development and examples:
 
 ```bash
-pip install -r requirements.txt
+python -m venv .venv
+source .venv/bin/activate
+pip install -e .[dev,examples]
 ```
 
-For development and testing you can also install the optional tools defined in
-`pyproject.toml`:
+The main runtime requirements are `torch`, `gymnasium`/`gym`, `numpy` and `tqdm`.  Optional extras provide `pytest`, `ruff`, `black` and `matplotlib` for plotting the demos.
+
+## Running the examples
+
+Each script inside `examples/` can be launched as a module:
 
 ```bash
-pip install -e .[dev]
+python -m examples.01_demo_linear_tracking
+python -m examples.02_demo_cartpole_regulation
+python -m examples.03_demo_cartpole_regulationAC
 ```
 
-The main runtime dependencies are:
-
-- `torch`
-- `gymnasium` and `gym`
-- `numpy`
-- `tqdm`
-- `matplotlib`
-- `pytest` (for running the test suite)
-
-## Examples
-
-Several demos are available in the `examples/` directory.  The following command
-starts a training session for the CartPole environment using the actor–critic
-setup with differentiable MPC guidance:
+Alternatively a convenience entry point is installed:
 
 ```bash
-python examples/03_demo_cartpole_regulationAC.py
+ac-mpc-examples 03_demo_cartpole_regulationAC
 ```
 
-## Running the tests
+## Testing
 
-The repository includes a small test suite that checks gradient propagation and
-correct forward behaviour.  After installing the development dependencies run:
+After installing the development extras simply run:
 
 ```bash
-pytest
+pytest -q
 ```
 
+This checks gradient propagation and numerical consistency of the differentiable MPC.
