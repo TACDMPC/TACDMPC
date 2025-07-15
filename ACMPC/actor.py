@@ -90,7 +90,13 @@ class ActorMPC(nn.Module):
         return log_std
 
     # ------------------------------------------------------------------
-    def get_action(self, x: Tensor, U_init: Tensor | None = None, deterministic: bool | None = None):
+    def get_action(
+        self,
+        x: Tensor,
+        U_init: Tensor | None = None,
+        deterministic: bool | None = None,
+        return_entropy: bool = False,
+    ):
         single = x.ndim == 1
         if single:
             x = x.unsqueeze(0)
@@ -117,9 +123,13 @@ class ActorMPC(nn.Module):
         else:
             action = dist.rsample()
         log_prob = dist.log_prob(action).sum(dim=-1)
+        entropy = dist.entropy().sum(dim=-1)
         if single:
             action = action.squeeze(0)
             log_prob = log_prob.squeeze(0)
+            entropy = entropy.squeeze(0)
+        if return_entropy:
+            return action, log_prob, entropy
         return action, log_prob
 
     # alias for nn.Module forward
