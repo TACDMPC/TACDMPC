@@ -21,7 +21,7 @@ source .venv/bin/activate
 pip install -e .[dev,examples]
 ```
 
-The main runtime requirements are `torch`, `gymnasium`/`gym`, `numpy` and `tqdm`.  Optional extras provide `pytest`, `ruff`, `black` and `matplotlib` for plotting the demos.
+Runtime dependencies are `torch>=2.2`, `gymnasium`/`gym`, `numpy`, `tqdm` and `transformers`.  Optionally `cvxpylayers` can be installed if you prefer a CVXPY based solver.  Development extras provide `pytest`, `ruff` and `black` together with `matplotlib` for the demos.
 
 ## Running the examples
 
@@ -31,6 +31,7 @@ Each script inside `examples/` can be launched as a module:
 python -m examples.01_demo_linear_tracking
 python -m examples.02_demo_cartpole_regulation
 python -m examples.03_demo_cartpole_regulationAC
+python -m examples.01_simple
 ```
 
 Alternatively a convenience entry point is installed:

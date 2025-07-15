@@ -13,3 +13,4 @@ checkpoints/
 *.ckpt
 *.tfevents*
 
+*.egg-info/
