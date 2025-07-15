@@ -281,7 +281,8 @@ class DifferentiableMPCController(torch.nn.Module):
         x_current = x0
         U_init = torch.zeros(B, H, nu, device=device, dtype=dtype)
         if getattr(self, 'U_prev', None) is not None and self.U_prev.shape[0] == B:
-            U_init = self.U_prev
+            U_init = torch.roll(self.U_prev, shifts=-1, dims=1)
+            U_init[:, -1] = 0.0
 
         xs_list, us_list = [x0], []
 

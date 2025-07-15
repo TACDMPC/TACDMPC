@@ -117,7 +117,8 @@ class ActorMPC(nn.Module):
             if U_init.shape[0] != B:
                 U_init = U_init.expand(B, -1, -1)
         if self.U_prev is not None and self.U_prev.shape[0] == B:
-            U_init = self.U_prev
+            U_init = torch.roll(self.U_prev, shifts=-1, dims=1)
+            U_init[:, -1] = 0.0
         u_mpc, _ = self.mpc.solve_step(x, U_init)
         self.U_prev = self.mpc.U_last.detach()
         det = self.deterministic if deterministic is None else deterministic
