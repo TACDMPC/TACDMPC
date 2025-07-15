@@ -3,7 +3,7 @@
 import torch
 import torch.optim as optim
 from contextlib import nullcontext
-from importlib import import_module, util as import_util
+from importlib import util as import_util
 from pathlib import Path
 from utils.profiler import Profiler
 
