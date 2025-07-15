@@ -17,7 +17,7 @@ dependencies = [
   "gym>=0.26",
   "gymnasium>=1.2",
   "numpy>=1.24",
-  ydrapa-codex/rifattorizza-progetto-per-layer-mpc
+  # ydrapa-codex/rifattorizza-progetto-per-layer-mpc
   "tqdm>=4.66",
   "transformers>=4.37"
 
