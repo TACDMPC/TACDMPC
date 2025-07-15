@@ -2,6 +2,7 @@
 import torch
 from ACMPC import ActorMPC, CriticTransformer
 from DifferentialMPC import DifferentiableMPCController
+from utils import seed_everything
 
 
 def dummy_dyn(x, u, dt):
@@ -24,6 +25,7 @@ class DummyEnv:
 
 
 def main():
+    seed_everything(0)
     device = torch.device("cpu")
     class Policy(torch.nn.Module):
         def __init__(self):

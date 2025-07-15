@@ -1,6 +1,11 @@
 """Minimal PPO training loop for ActorMPC and CriticTransformer."""
+
 import torch
 import torch.optim as optim
+from utils import seed_everything
+from contextlib import nullcontext
+from utils.profiler import Profiler
+
 
 from .actor import ActorMPC
 from .critic_transformer import CriticTransformer
@@ -30,22 +35,10 @@ def train(
     steps: int = 100,
     *,
     use_amp: bool = False,
+    profile: bool = False,
+    log_file: str | None = None,
+    track_gpu: bool = False,
 ):
-    """Train actor and critic for a given number of steps.
-
-    Parameters
-    ----------
-    env : any
-        Environment with ``reset`` and ``step`` methods.
-    actor : ActorMPC
-        The actor model.
-    critic : CriticTransformer
-        The critic model.
-    steps : int, optional
-        Number of training iterations, by default 100.
-    use_amp : bool, optional
-        Enable automatic mixed precision training on CUDA, by default False.
-    """
 
     actor_opt = optim.Adam(actor.parameters(), lr=3e-4)
     critic_opt = optim.Adam(critic.parameters(), lr=3e-4)
@@ -53,6 +46,17 @@ def train(
 
     for _ in range(steps):
         with torch.cuda.amp.autocast(enabled=use_amp):
+
+        ctx = (
+            Profiler(
+                log_file=log_file,
+                track_gpu=track_gpu,
+                batches=1,
+            )
+            if profile
+            else nullcontext()
+        )
+        with ctx:
             states, actions, rewards = rollout(env, actor, horizon=10)
             # simple cumulative reward
             returns = rewards.flip(0).cumsum(0).flip(0)
@@ -86,4 +90,4 @@ def train(
             actor_loss.backward(retain_graph=True)
             critic_loss.backward()
             actor_opt.step()
-            critic_opt.step()
+

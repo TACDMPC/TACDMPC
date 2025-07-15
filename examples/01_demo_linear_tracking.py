@@ -3,6 +3,7 @@ import time
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
+from utils import seed_everything
 
 # Importa le classi principali dal tuo nuovo pacchetto
 from DifferentialMPC import DifferentiableMPCController, GeneralQuadCost
@@ -22,6 +23,7 @@ def f_dyn_jac_linear(x, u, dt):
 
 
 def main():
+    seed_everything(0)
     torch.set_default_dtype(torch.double)
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     print(f"Esecuzione su dispositivo: {device}")

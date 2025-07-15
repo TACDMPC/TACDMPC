@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import gym
 import os
 from contextlib import redirect_stdout
+from utils import seed_everything
 
 # Importa le classi principali dal pacchetto
 from DifferentialMPC import DifferentiableMPCController, GeneralQuadCost
@@ -55,6 +56,7 @@ def f_cartpole(x: torch.Tensor, u: torch.Tensor, dt: float, p: CartPoleParams) -
 
 # ======================== ROUTINE PRINCIPALE ========================
 def main():
+    seed_everything(0)
     # --- Configurazione Globale ---
     torch.set_default_dtype(torch.float64)
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -108,7 +110,6 @@ def main():
 
     # --- Batch di stati iniziali casuali (vicino al punto di instabilità) ---
     base_state = torch.tensor([0.0, 0.0, 0.2, 0.0], device=DEVICE)  # Partenza con palo inclinato
-    torch.manual_seed(0)
     x0 = base_state + torch.tensor([1.0, 1.0, 0.5, 0.5], device=DEVICE) * torch.randn(BATCH_SIZE, nx, device=DEVICE)
 
     # --- Esecuzione Simulazione ---
