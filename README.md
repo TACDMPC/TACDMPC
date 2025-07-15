@@ -1,15 +1,13 @@
 # TACDMPC
 
+**Transformer Actor–Critic with a differentiable MPC step.**
 
- **Transformer Actor–Critic with a differentiable MPC step.**
-
-TACDMPC implements an Actor–Critic architecture where the policy operates in order to optimize the OCP weights and delegates the first control action to a differentiable Model Predictive Controller.  Unlike the original paper that employs an MLP critic, here the critic is a small Transformer that processes a short history of states and actions.
+TACDMPC implements an Actor–Critic architecture where the policy learns the MPC cost weights online and delegates the first control action to a differentiable Model Predictive Controller. The critic is a lightweight Transformer built with the Hugging Face `transformers` library.
 
 ## Overview
 
-1. **Actor** – operates on matrix weight of the DMPC in order to optimize them
-2. **Critic** – Transformer encoder estimating the Q-value from past state/action pairs.
-
+1. **Actor** – learns the MPC cost matrices $Q$ and $R$ (also time varying) and updates them via backpropagation through the solver.
+2. **Critic** – Transformer encoder estimating the state–action value from past and predicted trajectories.
 
 ## Installation
 
@@ -21,7 +19,7 @@ source .venv/bin/activate
 pip install -e .[dev,examples]
 ```
 
-The main runtime requirements are `torch`, `gymnasium`/`gym`, `numpy` and `tqdm`.  Optional extras provide `pytest`, `ruff`, `black` and `matplotlib` for plotting the demos.
+Runtime requirements include **PyTorch ≥2.2** and **transformers**. Optional extras provide `pytest`, `ruff`, `black` and `matplotlib` for the demos.
 
 ## Running the examples
 
