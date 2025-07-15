@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import gym
 import os
 from contextlib import redirect_stdout
+from config import MPCConfig, parse_mpc_config
 from DifferentialMPC import DifferentiableMPCController, GeneralQuadCost, GradMethod
 
 LOG_STD_MAX = 2
@@ -18,29 +19,40 @@ ACTION_SCALE = 20.0  # Scala l'output di tanh [-1, 1] alla forza reale (es. [-20
 # =============================================================================
 @dataclass(frozen=True)
 class CartPoleParams:
-    m_c: float;
-    m_p: float;
-    l: float;
+    m_c: float
+    m_p: float
+    l: float
     g: float
 
     @classmethod
     def from_gym(cls):
-        with open(os.devnull, 'w') as f, redirect_stdout(f):
+        with open(os.devnull, "w") as f, redirect_stdout(f):
             env = gym.make("CartPole-v1")
-        return cls(m_c=float(env.unwrapped.masscart), m_p=float(env.unwrapped.masspole),
-                   l=float(env.unwrapped.length), g=float(env.unwrapped.gravity))
+        return cls(
+            m_c=float(env.unwrapped.masscart),
+            m_p=float(env.unwrapped.masspole),
+            l=float(env.unwrapped.length),
+            g=float(env.unwrapped.gravity),
+        )
 
 
-def f_cartpole_dyn(x: torch.Tensor, u: torch.Tensor, dt: float, p: CartPoleParams) -> torch.Tensor:
+def f_cartpole_dyn(
+    x: torch.Tensor, u: torch.Tensor, dt: float, p: CartPoleParams
+) -> torch.Tensor:
     """Dinamica non lineare del Cart-Pole, gestisce il batching."""
     pos, vel, theta, omega = torch.unbind(x, dim=-1)
     force = u.squeeze(-1)
     sin_t, cos_t = torch.sin(theta), torch.cos(theta)
     total_mass, m_p_l = p.m_c + p.m_p, p.m_p * p.l
-    temp = (force + m_p_l * omega ** 2 * sin_t) / total_mass
-    theta_dd = (p.g * sin_t - cos_t * temp) / (p.l * (4.0 / 3.0 - p.m_p * cos_t ** 2 / total_mass))
+    temp = (force + m_p_l * omega**2 * sin_t) / total_mass
+    theta_dd = (p.g * sin_t - cos_t * temp) / (
+        p.l * (4.0 / 3.0 - p.m_p * cos_t**2 / total_mass)
+    )
     vel_dd = temp - m_p_l * theta_dd * cos_t / total_mass
-    return torch.stack((pos + vel * dt, vel + vel_dd * dt, theta + omega * dt, omega + theta_dd * dt), dim=-1)
+    return torch.stack(
+        (pos + vel * dt, vel + vel_dd * dt, theta + omega * dt, omega + theta_dd * dt),
+        dim=-1,
+    )
 
 
 class CartPoleEnv:
@@ -55,11 +67,14 @@ class CartPoleEnv:
 
     def reset(self):
         # Stato iniziale: carrello al centro, palo leggermente inclinato
-        self.state = torch.tensor([0.0, 0.0, 0.2, 0.0], device=self.device, dtype=torch.float64)
+        self.state = torch.tensor(
+            [0.0, 0.0, 0.2, 0.0], device=self.device, dtype=torch.float64
+        )
         return self.state
 
     def step(self, action: torch.Tensor):
-        if self.state is None: raise RuntimeError("Chiamare reset() prima di step().")
+        if self.state is None:
+            raise RuntimeError("Chiamare reset() prima di step().")
 
         # La dinamica richiede input batch, quindi aggiungiamo una dimensione
         state_batch = self.state.unsqueeze(0)
@@ -69,7 +84,9 @@ class CartPoleEnv:
 
         pos, _, theta, _ = torch.unbind(self.state)
         # Ricompensa per stare vicino al centro e con il palo dritto
-        reward = torch.exp(-pos.abs()) + torch.exp(-theta.abs()) - 0.001 * (action ** 2).sum()
+        reward = (
+            torch.exp(-pos.abs()) + torch.exp(-theta.abs()) - 0.001 * (action**2).sum()
+        )
 
         done = bool(pos.abs() > 2.4 or theta.abs() > 0.6)
         return self.state, reward.item(), done
@@ -82,7 +99,9 @@ class ActorNet(nn.Module):
     def __init__(self, nx: int, nu: int, h_dim: int = 256):
         super().__init__()
         self.nx, self.nu = nx, nu
-        self.base_network = nn.Sequential(nn.Linear(nx, h_dim), nn.ReLU(), nn.Linear(h_dim, h_dim), nn.ReLU())
+        self.base_network = nn.Sequential(
+            nn.Linear(nx, h_dim), nn.ReLU(), nn.Linear(h_dim, h_dim), nn.ReLU()
+        )
         self.mean_head = nn.Linear(h_dim, nu)
         self.log_std_head = nn.Linear(h_dim, nu)
         self.cost_head = nn.Sequential(nn.Linear(h_dim, nx + nu), nn.Softplus())
@@ -92,7 +111,12 @@ class ActorNet(nn.Module):
         mean = self.mean_head(x)
         log_std = torch.clamp(self.log_std_head(x), LOG_STD_MIN, LOG_STD_MAX)
         cost_diagonals = self.cost_head(x) + 1e-6
-        return mean, log_std, cost_diagonals[..., :self.nx], cost_diagonals[..., self.nx:]
+        return (
+            mean,
+            log_std,
+            cost_diagonals[..., : self.nx],
+            cost_diagonals[..., self.nx :],
+        )
 
 
 class ActorMPC(nn.Module):
@@ -102,16 +126,31 @@ class ActorMPC(nn.Module):
         self.actor_net = ActorNet(nx, nu).to(device)
 
         dummy_C = torch.eye(nx + nu, device=device).repeat(horizon, 1, 1)
-        cost_module = GeneralQuadCost(nx=nx, nu=nu, C=dummy_C, c=torch.zeros_like(dummy_C[..., 0]),
-                                      C_final=dummy_C[0], c_final=torch.zeros_like(dummy_C[0, ..., 0]), device=device)
-
-        self.mpc = DifferentiableMPCController(
-            f_dyn=f_dyn, cost_module=cost_module, horizon=horizon, step_size=dt,
-            grad_method=GradMethod.FINITE_DIFF, device=device, total_time=horizon * dt,
-            u_min=torch.tensor([-ACTION_SCALE]), u_max=torch.tensor([ACTION_SCALE])
+        cost_module = GeneralQuadCost(
+            nx=nx,
+            nu=nu,
+            C=dummy_C,
+            c=torch.zeros_like(dummy_C[..., 0]),
+            C_final=dummy_C[0],
+            c_final=torch.zeros_like(dummy_C[0, ..., 0]),
+            device=device,
         )
 
-    def get_action(self, state: torch.Tensor, U_init: torch.Tensor, deterministic=False):
+        self.mpc = DifferentiableMPCController(
+            f_dyn=f_dyn,
+            cost_module=cost_module,
+            horizon=horizon,
+            step_size=dt,
+            grad_method=GradMethod.FINITE_DIFF,
+            device=device,
+            total_time=horizon * dt,
+            u_min=torch.tensor([-ACTION_SCALE]),
+            u_max=torch.tensor([ACTION_SCALE]),
+        )
+
+    def get_action(
+        self, state: torch.Tensor, U_init: torch.Tensor, deterministic=False
+    ):
         state = state.to(self.device)
         state_b = state.unsqueeze(0) if state.ndim == 1 else state
 
@@ -123,7 +162,9 @@ class ActorMPC(nn.Module):
         self.mpc.cost_module.C = C_step.unsqueeze(0).repeat(self.horizon, 1, 1)
         self.mpc.cost_module.C_final = C_step * 10.0
 
-        with torch.no_grad():  # Il solve dell'MPC è solo una guida, non vogliamo gradienti da qui
+        with (
+            torch.no_grad()
+        ):  # Il solve dell'MPC è solo una guida, non vogliamo gradienti da qui
             mpc_action, _ = self.mpc.solve_step(state, U_init.to(self.device))
 
         final_mean = mean.squeeze(0) + mpc_action.detach()
@@ -143,14 +184,17 @@ class ActorMPC(nn.Module):
 
 
 # --- Sanity Check ---
-if __name__ == '__main__':
+if __name__ == "__main__":
     torch.set_default_dtype(torch.float64)
-    env = CartPoleEnv(device="cpu")
+    cfg = parse_mpc_config()
+    env = CartPoleEnv(dt=cfg.dt, device="cpu")
     state = env.reset()
 
-    actor = ActorMPC(nx=4, nu=1, horizon=15, dt=env.dt, f_dyn=env.dyn_func, device="cpu")
+    actor = ActorMPC(
+        nx=4, nu=1, horizon=cfg.horizon, dt=env.dt, f_dyn=env.dyn_func, device="cpu"
+    )
 
-    U_init = torch.zeros(15, 1)
+    U_init = torch.zeros(cfg.horizon, 1)
     action, log_p = actor.get_action(state, U_init)
 
     print("Sanity Check Step 4.1")

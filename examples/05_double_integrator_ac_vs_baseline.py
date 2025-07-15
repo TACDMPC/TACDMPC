@@ -3,6 +3,7 @@ import torch.nn as nn
 import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import trange
+from config import TrainingConfig, parse_training_config
 
 from DifferentialMPC import DifferentiableMPCController, GeneralQuadCost
 from ACMPC import ActorMPC, CriticTransformer, training_loop
@@ -11,7 +12,9 @@ from ACMPC import ActorMPC, CriticTransformer, training_loop
 def f_dyn_linear(x: torch.Tensor, u: torch.Tensor, dt: float) -> torch.Tensor:
     A = torch.tensor([[1.0, dt], [0.0, 1.0]], dtype=x.dtype, device=x.device)
     B = torch.tensor([[0.0], [dt]], dtype=x.dtype, device=x.device)
-    return torch.einsum("...ij,...j->...i", A, x) + torch.einsum("...ij,...j->..i", B, u)
+    return torch.einsum("...ij,...j->...i", A, x) + torch.einsum(
+        "...ij,...j->..i", B, u
+    )
 
 
 class DoubleIntegratorEnv:
@@ -45,17 +48,23 @@ class DoubleIntegratorEnv:
         return self.state, reward, done
 
 
-def run_baseline(env: DoubleIntegratorEnv, horizon: int = 20, N_sim: int = 200):
+def run_baseline(
+    env: DoubleIntegratorEnv, cfg: TrainingConfig
+) -> tuple[float, torch.Tensor, torch.Tensor]:
     nx, nu = 2, 1
     device = env.device
     dt = env.dt
     Q = torch.diag(torch.tensor([10.0, 1.0], device=device))
     R = torch.diag(torch.tensor([0.1], device=device))
+    horizon = cfg.mpc.horizon
+    N_sim = cfg.mpc.N_sim
     C = torch.zeros(horizon, nx + nu, nx + nu, device=device)
     C[:, :nx, :nx] = Q
     C[:, nx:, nx:] = R
     c = torch.zeros_like(C[..., 0])
-    cost = GeneralQuadCost(nx, nu, C, c, C[0] * 10, torch.zeros(nx + nu, device=device), device=str(device))
+    cost = GeneralQuadCost(
+        nx, nu, C, c, C[0] * 10, torch.zeros(nx + nu, device=device), device=str(device)
+    )
     mpc = DifferentiableMPCController(
         f_dyn=f_dyn_linear,
         total_time=horizon * dt,
@@ -85,7 +94,7 @@ def run_baseline(env: DoubleIntegratorEnv, horizon: int = 20, N_sim: int = 200):
     return rmse, xs, refs
 
 
-def train_ac(env: DoubleIntegratorEnv, steps: int = 1000, horizon: int = 20):
+def train_ac(env: DoubleIntegratorEnv, cfg: TrainingConfig):
     nx, nu = 2, 1
     device = env.device
     policy = nn.Sequential(
@@ -93,15 +102,31 @@ def train_ac(env: DoubleIntegratorEnv, steps: int = 1000, horizon: int = 20):
         nn.Tanh(),
         nn.Linear(64, 2 * nu),
     )
-    actor = ActorMPC(nx, nu, horizon=horizon, dt=env.dt, f_dyn=f_dyn_linear, policy_net=policy, device=str(device))
+    actor = ActorMPC(
+        nx,
+        nu,
+        horizon=cfg.mpc.horizon,
+        dt=env.dt,
+        f_dyn=f_dyn_linear,
+        policy_net=policy,
+        device=str(device),
+    )
     critic = CriticTransformer(nx, nu, history_len=1, pred_horizon=1)
-    actor.double(); critic.double()
+    actor.double()
+    critic.double()
     rewards = []
     q_grads = []
-    for _ in trange(steps, desc="training", leave=False):
-        training_loop.train(env, actor, critic, steps=1)
+    for _ in trange(cfg.steps, desc="training", leave=False):
+        step_cfg = TrainingConfig(
+            steps=1, rollout_horizon=cfg.rollout_horizon, mpc=cfg.mpc, optim=cfg.optim
+        )
+        training_loop.train(env, actor, critic, step_cfg)
         with torch.no_grad():
-            q_grad = actor.q_raw.grad.abs().mean().item() if actor.q_raw.grad is not None else 0.0
+            q_grad = (
+                actor.q_raw.grad.abs().mean().item()
+                if actor.q_raw.grad is not None
+                else 0.0
+            )
         q_grads.append(q_grad)
         state = env.reset()
         ep_reward = 0.0
@@ -133,17 +158,17 @@ def evaluate_actor(env: DoubleIntegratorEnv, actor: ActorMPC, episodes: int = 20
     return np.mean(rmse_list), np.std(rmse_list), traj, ref
 
 
-def main():
+def main(cfg: TrainingConfig):
     torch.set_default_dtype(torch.double)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    env = DoubleIntegratorEnv(device=device)
+    env = DoubleIntegratorEnv(dt=cfg.mpc.dt, horizon=cfg.mpc.horizon, device=device)
 
     print("Running baseline MPC...")
-    rmse_baseline, traj_b, ref_b = run_baseline(env)
+    rmse_baseline, traj_b, ref_b = run_baseline(env, cfg)
     print(f"Baseline RMSE: {rmse_baseline:.3f} m")
 
     print("\nTraining actor-critic MPC...")
-    actor, rewards, q_grads = train_ac(env, steps=100)
+    actor, rewards, q_grads = train_ac(env, cfg)
     rmse_mean, rmse_std, traj_ac, ref_ac = evaluate_actor(env, actor)
     print(f"Actor-Critic RMSE: {rmse_mean:.3f} ± {rmse_std:.3f} m")
 
@@ -195,4 +220,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    cfg = parse_training_config()
+    main(cfg)
