@@ -1,5 +1,5 @@
 import torch
-from ActorCritic import ActorNet
+from DeprecatedActorCritic import ActorNet
 
 
 def test_actor_net_output_shapes():

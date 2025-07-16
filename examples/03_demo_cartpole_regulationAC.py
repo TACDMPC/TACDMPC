@@ -1,38 +1,35 @@
+import time
 import torch
-import torch.nn as nn
-from torch.distributions import Normal
 import numpy as np
+import matplotlib.pyplot as plt
 from dataclasses import dataclass
-import gym
-import os
-from contextlib import redirect_stdout
-from utils import seed_everything
+
+# ======================================================================================
+# --- 1. IMPORT DEI COMPONENTI DEFINITI ESTERNAMENTE ---
+# ======================================================================================
+
+# Importa i componenti del controllore MPC differenziabile
 from DifferentialMPC import DifferentiableMPCController, GeneralQuadCost, GradMethod
 
-LOG_STD_MAX = 2
-LOG_STD_MIN = -20
-ACTION_SCALE = 20.0  # Scala l'output di tanh [-1, 1] alla forza reale (es. [-20, 20])
+# Importa i componenti dell'agente AC-MPC che abbiamo definito
+from ACMPC import ActorMPC
+from ACMPC import CriticTransformer
+from ACMPC import train
 
 
-# =============================================================================
-# 1. DEFINIZIONE DELL'AMBIENTE CARTPOLE (dal tuo script)
-# =============================================================================
+# ======================================================================================
+# --- 2. DEFINIZIONE DEL TASK SPECIFICO (CART-POLE) ---
+# ======================================================================================
+
 @dataclass(frozen=True)
 class CartPoleParams:
-    m_c: float;
-    m_p: float;
-    l: float;
-    g: float
-
-    @classmethod
-    def from_gym(cls):
-        with open(os.devnull, 'w') as f, redirect_stdout(f):
-            env = gym.make("CartPole-v1")
-        return cls(m_c=float(env.unwrapped.masscart), m_p=float(env.unwrapped.masspole),
-                   l=float(env.unwrapped.length), g=float(env.unwrapped.gravity))
+    m_c: float = 1.0
+    m_p: float = 0.1
+    l: float = 0.5
+    g: float = 9.81
 
 
-def f_cartpole_dyn(x: torch.Tensor, u: torch.Tensor, dt: float, p: CartPoleParams) -> torch.Tensor:
+def f_cartpole(x: torch.Tensor, u: torch.Tensor, dt: float, p: CartPoleParams) -> torch.Tensor:
     """Dinamica non lineare del Cart-Pole, gestisce il batching."""
     pos, vel, theta, omega = torch.unbind(x, dim=-1)
     force = u.squeeze(-1)
@@ -45,121 +42,161 @@ def f_cartpole_dyn(x: torch.Tensor, u: torch.Tensor, dt: float, p: CartPoleParam
 
 
 class CartPoleEnv:
-    """Wrapper per la dinamica del CartPole per simulazioni RL."""
+    """Wrapper per l'ambiente per compatibilità con il training loop."""
 
-    def __init__(self, dt=0.05, device="cpu"):
-        self.params = CartPoleParams.from_gym()
+    def __init__(self, dyn_fn, reward_fn, dt, sim_horizon, device):
+        self.dyn = dyn_fn
+        self.reward_fn = reward_fn
         self.dt = dt
+        self.sim_horizon = sim_horizon
         self.device = device
         self.state = None
-        self.dyn_func = lambda x, u, dt: f_cartpole_dyn(x, u, dt, self.params)
 
     def reset(self):
-        # Stato iniziale: carrello al centro, palo leggermente inclinato
-        self.state = torch.tensor([0.0, 0.0, 0.2, 0.0], device=self.device, dtype=torch.float64)
+        # Stato iniziale casuale vicino al punto di equilibrio instabile
+        self.state = (torch.rand(4, device=self.device) - 0.5) * torch.tensor([0.1, 0.1, 0.4, 0.4], device=self.device)
         return self.state
 
-    def step(self, action: torch.Tensor):
-        if self.state is None: raise RuntimeError("Chiamare reset() prima di step().")
-
-        # La dinamica richiede input batch, quindi aggiungiamo una dimensione
-        state_batch = self.state.unsqueeze(0)
-        action_batch = action.to(self.device).unsqueeze(0)
-
-        self.state = self.dyn_func(state_batch, action_batch, self.dt).squeeze(0)
-
-        pos, _, theta, _ = torch.unbind(self.state)
-        # Ricompensa per stare vicino al centro e con il palo dritto
-        reward = torch.exp(-pos.abs()) + torch.exp(-theta.abs()) - 0.001 * (action ** 2).sum()
-
-        done = bool(pos.abs() > 2.4 or theta.abs() > 0.6)
-        return self.state, reward.item(), done
+    def step(self, action):
+        prev_state = self.state
+        self.state = self.dyn(self.state.unsqueeze(0), action.unsqueeze(0), self.dt).squeeze(0)
+        reward = self.reward_fn(prev_state.unsqueeze(0), action.unsqueeze(0), self.state.unsqueeze(0)).item()
+        # Condizione di fine episodio
+        done = abs(self.state[0]) > 2.4 or abs(self.state[2]) > 0.209
+        return self.state, reward, done
 
 
-# =============================================================================
-# 2. DEFINIZIONE DELL'ATTORE E DELLA POLICY (versioni finali)
-# =============================================================================
-class ActorNet(nn.Module):
-    def __init__(self, nx: int, nu: int, h_dim: int = 256):
-        super().__init__()
-        self.nx, self.nu = nx, nu
-        self.base_network = nn.Sequential(nn.Linear(nx, h_dim), nn.ReLU(), nn.Linear(h_dim, h_dim), nn.ReLU())
-        self.mean_head = nn.Linear(h_dim, nu)
-        self.log_std_head = nn.Linear(h_dim, nu)
-        self.cost_head = nn.Sequential(nn.Linear(h_dim, nx + nu), nn.Softplus())
+# ======================== FUNZIONI DI PLOTTING ========================
+def _plot_comparison(xs_base, us_base, xs_acmpc, us_acmpc, dt, target, batch_size):
+    """Visualizza i risultati del confronto."""
+    N_TO_PLOT = min(5, batch_size)
+    labels = ["Posizione [m]", "Velocità [m/s]", "Angolo [rad]", "Vel. Angolare [rad/s]"]
+    time_state = torch.arange(xs_base.shape[1]) * dt
+    time_ctrl = torch.arange(us_base.shape[1]) * dt
+    colors = plt.cm.viridis(np.linspace(0, 1, N_TO_PLOT))
 
-    def forward(self, state: torch.Tensor):
-        x = self.base_network(state)
-        mean = self.mean_head(x)
-        log_std = torch.clamp(self.log_std_head(x), LOG_STD_MIN, LOG_STD_MAX)
-        cost_diagonals = self.cost_head(x) + 1e-6
-        return mean, log_std, cost_diagonals[..., :self.nx], cost_diagonals[..., self.nx:]
+    fig, axs = plt.subplots(xs_base.shape[-1], 1, figsize=(14, 12), sharex=True)
+    fig.suptitle("Confronto Traiettorie: MPC Base (--) vs AC-MPC (-)")
 
+    for i in range(xs_base.shape[-1]):
+        for b in range(N_TO_PLOT):
+            label_base = "MPC Base" if b == 0 else None
+            label_acmpc = "AC-MPC" if b == 0 else None
+            axs[i].plot(time_state, xs_base[b, :, i], color=colors[b], linestyle='--', label=label_base)
+            axs[i].plot(time_state, xs_acmpc[b, :, i], color=colors[b], linestyle='-', label=label_acmpc)
+        axs[i].axhline(target[i].item(), linestyle=":", color="k")
+        axs[i].set_ylabel(labels[i]);
+        axs[i].grid(True)
 
-class ActorMPC(nn.Module):
-    def __init__(self, nx: int, nu: int, horizon: int, dt: float, f_dyn, device="cpu"):
-        super().__init__()
-        self.nx, self.nu, self.horizon, self.device = nx, nu, horizon, device
-        self.actor_net = ActorNet(nx, nu).to(device)
+    fig.legend(loc='upper right')
+    axs[-1].set_xlabel("Tempo [s]")
 
-        dummy_C = torch.eye(nx + nu, device=device).repeat(horizon, 1, 1)
-        cost_module = GeneralQuadCost(nx=nx, nu=nu, C=dummy_C, c=torch.zeros_like(dummy_C[..., 0]),
-                                      C_final=dummy_C[0], c_final=torch.zeros_like(dummy_C[0, ..., 0]), device=device)
+    plt.figure(figsize=(14, 6))
+    plt.title("Confronto Comandi di Controllo")
+    for b in range(N_TO_PLOT):
+        plt.plot(time_ctrl, us_base[b, :, 0], color=colors[b], linestyle='--', label="MPC Base" if b == 0 else None)
+        plt.plot(time_ctrl, us_acmpc[b, :, 0], color=colors[b], linestyle='-', label="AC-MPC" if b == 0 else None)
+    plt.xlabel("Tempo [s]");
+    plt.ylabel("Forza [N]");
+    plt.grid(True);
+    plt.legend()
 
-        self.mpc = DifferentiableMPCController(
-            f_dyn=f_dyn, cost_module=cost_module, horizon=horizon, step_size=dt,
-            grad_method=GradMethod.FINITE_DIFF, device=device, total_time=horizon * dt,
-            u_min=torch.tensor([-ACTION_SCALE]), u_max=torch.tensor([ACTION_SCALE])
-        )
-
-    def get_action(self, state: torch.Tensor, U_init: torch.Tensor, deterministic=False):
-        state = state.to(self.device)
-        state_b = state.unsqueeze(0) if state.ndim == 1 else state
-
-        mean, log_std, q_diag, r_diag = self.actor_net(state_b)
-
-        Q_mat = torch.diag_embed(q_diag.squeeze(0))
-        R_mat = torch.diag_embed(r_diag.squeeze(0))
-        C_step = torch.block_diag(Q_mat, R_mat)
-        self.mpc.cost_module.C = C_step.unsqueeze(0).repeat(self.horizon, 1, 1)
-        self.mpc.cost_module.C_final = C_step * 10.0
-
-        with torch.no_grad():  # Il solve dell'MPC è solo una guida, non vogliamo gradienti da qui
-            mpc_action, _ = self.mpc.solve_step(state, U_init.to(self.device))
-
-        final_mean = mean.squeeze(0) + mpc_action.detach()
-        std = log_std.exp().squeeze(0)
-        policy_dist = Normal(final_mean, std)
-
-        action_sample = final_mean if deterministic else policy_dist.rsample()
-        log_prob = policy_dist.log_prob(action_sample).sum(axis=-1)
-
-        action_tanh = torch.tanh(action_sample)
-        log_prob -= torch.log(1 - action_tanh.pow(2) + 1e-6).sum(axis=-1)
-
-        # Scala l'azione all'intervallo fisico del sistema
-        final_action = action_tanh * ACTION_SCALE
-
-        return final_action, log_prob
+    plt.show()
 
 
-# --- Sanity Check ---
-if __name__ == '__main__':
-    seed_everything(0)
+# ======================== 3. SCRIPT PRINCIPALE DI ORCHESTRAZIONE ========================
+def main():
+    # --- Configurazione Globale ---
     torch.set_default_dtype(torch.float64)
-    env = CartPoleEnv(device="cpu")
-    state = env.reset()
+    DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Esecuzione Cart-Pole su dispositivo: {DEVICE}")
 
-    actor = ActorMPC(nx=4, nu=1, horizon=15, dt=env.dt, f_dyn=env.dyn_func, device="cpu")
+    # --- Iperparametri ---
+    BATCH_SIZE_EVAL = 50
+    DT = 0.05
+    MPC_HORIZON = 20
+    SIM_HORIZON_TRAIN = 100
+    SIM_HORIZON_EVAL = 150
+    TRAINING_STEPS = 100  # Aumentare per un training più approfondito
+    CRITIC_HISTORY_LEN = 10
 
-    U_init = torch.zeros(15, 1)
-    action, log_p = actor.get_action(state, U_init)
+    # --- Setup Ambiente e Dinamica ---
+    params = CartPoleParams()
+    nx, nu = 4, 1
+    dyn = lambda x, u, dt: f_cartpole(x, u, dt, params)
 
-    print("Sanity Check Step 4.1")
-    print(f"Stato iniziale: {state.numpy()}")
-    print(f"Azione campionata: {action.detach().numpy()}")
-    print(f"Log Probabilità: {log_p.item()}")
+    # --- Funzione di Reward (usata per training e per definire il costo base) ---
+    Q_reward = torch.diag(torch.tensor([10.0, 1.0, 100.0, 1.0], device=DEVICE))
+    R_reward = torch.diag(torch.tensor([0.1], device=DEVICE))
 
-    assert action.shape == (1,)
-    assert log_p.ndim == 0
-    print("\n✅ Sanity check superato. L'ambiente e l'attore sono pronti.")
+    def cartpole_reward_fn(states, actions, _):
+        state_cost = torch.einsum('...i,ij,...j->...', states, Q_reward, states)
+        action_cost = torch.einsum('...i,ij,...j->...', actions, R_reward, actions)
+        return -(state_cost + action_cost)
+    print("\n--- 1. Inizio Addestramento Agente AC-MPC ---")
+    env_train = CartPoleEnv(dyn, cartpole_reward_fn, DT, SIM_HORIZON_TRAIN, DEVICE)
+    actor_mpc = ActorMPC(nx, nu, MPC_HORIZON, DT, dyn, device=str(DEVICE))
+    critic_mpc = CriticTransformer(nx, nu, CRITIC_HISTORY_LEN, MPC_HORIZON)
+    critic_mpc.to(device=DEVICE, dtype=torch.get_default_dtype())
+    train(
+        env=env_train,
+        actor=actor_mpc,
+        critic=critic_mpc,
+        reward_fn=cartpole_reward_fn,
+        steps=TRAINING_STEPS,
+        mpc_horizon=MPC_HORIZON
+    )
+    # --------------------
+
+    actor_mpc.eval()
+    print("--- Addestramento AC-MPC Completato ---\n")
+
+    # --- 2. Setup del Controllore MPC Base ---
+    print("--- 2. Setup Controllore MPC Base (con costi fissi) ---")
+    x_target = torch.zeros(nx, device=DEVICE)
+    C_base = torch.zeros(MPC_HORIZON, nx + nu, nx + nu, device=DEVICE)
+    C_base[:, :nx, :nx] = Q_reward
+    C_base[:, nx:, nx:] = R_reward
+    c_base = torch.zeros(MPC_HORIZON, nx + nu, device=DEVICE)
+    C_final_base = torch.zeros(nx + nu, nx + nu, device=DEVICE)
+    C_final_base[:nx, :nx] = Q_reward * 10
+    c_final_base = torch.zeros(nx + nu, device=DEVICE)
+    cost_base = GeneralQuadCost(
+        nx=nx, nu=nu, C=C_base, c=c_base, C_final=C_final_base, c_final=c_final_base,
+        device=str(DEVICE), x_ref=x_target.repeat(MPC_HORIZON + 1, 1), u_ref=torch.zeros(MPC_HORIZON, nu, device=DEVICE)
+    )
+    mpc_base = DifferentiableMPCController(
+        f_dyn=dyn, total_time=MPC_HORIZON * DT, step_size=DT, horizon=MPC_HORIZON,
+        cost_module=cost_base, u_min=torch.tensor([-20.0]), u_max=torch.tensor([20.0]),
+        N_sim=SIM_HORIZON_EVAL, device=str(DEVICE)
+    )
+
+    # --- 3. Esecuzione e Valutazione ---
+    print("--- 3. Esecuzione e Valutazione dei Controllori ---")
+    x0_eval = (torch.rand(BATCH_SIZE_EVAL, nx, device=DEVICE) - 0.5) * torch.tensor([1.0, 1.0, 0.5, 0.5], device=DEVICE)
+
+    # Rollout del MPC Base
+    print("Eseguendo il rollout per MPC Base...")
+    Xs_base, Us_base = mpc_base.forward(x0_eval)
+
+    # Rollout dell'AC-MPC addestrato
+    print("Eseguendo il rollout per AC-MPC...")
+    xs_acmpc_list, us_acmpc_list = [x0_eval], []
+    x_current = x0_eval
+    with torch.no_grad():  # Non serve calcolare gradienti durante la valutazione
+        for _ in range(SIM_HORIZON_EVAL):
+            action, _, _, _ = actor_mpc(x_current, deterministic=True)
+            us_acmpc_list.append(action)
+            x_current = dyn(x_current, action, DT)
+            xs_acmpc_list.append(x_current)
+    Xs_acmpc = torch.stack(xs_acmpc_list, dim=1)
+    Us_acmpc = torch.stack(us_acmpc_list, dim=1)
+    print("--- Valutazione Completata ---\n")
+
+    # --- 4. Plot dei Risultati ---
+    print("--- 4. Generazione Grafici di Confronto ---")
+    _plot_comparison(Xs_base.cpu(), Us_base.cpu(), Xs_acmpc.cpu(), Us_acmpc.cpu(), DT, x_target.cpu(), BATCH_SIZE_EVAL)
+
+
+if __name__ == "__main__":
+    main()

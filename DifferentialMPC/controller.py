@@ -934,6 +934,23 @@ class DifferentiableMPCController(torch.nn.Module):
 
     # -----------------------------------------------------------------
 
+    def reset(self) -> None:
+        """
+        Resetta lo stato interno del controller memorizzato dall'ultima esecuzione.
+        Questo è fondamentale per l'uso in cicli di training dove .backward()
+        viene chiamato ripetutamente.
+        """
+        if self.verbose > 0:
+            print("Resetting MPC controller internal state.")
+
+        self.U_last = None
+        self.X_last = None
+        self.H_last = None
+        self.F_last = None
+        self.lmb_last = None
+        self.tight_mask_last = None
+        self.converged = None
+
     def _compute_dlambda(
             self,
             A: torch.Tensor,

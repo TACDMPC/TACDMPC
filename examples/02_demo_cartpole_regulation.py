@@ -7,7 +7,6 @@ from dataclasses import dataclass
 import gym
 import os
 from contextlib import redirect_stdout
-from utils import seed_everything
 
 # Importa le classi principali dal pacchetto
 from DifferentialMPC import DifferentiableMPCController, GeneralQuadCost
@@ -53,10 +52,7 @@ def f_cartpole(x: torch.Tensor, u: torch.Tensor, dt: float, p: CartPoleParams) -
     ), dim=-1)
     return next_state
 
-
-# ======================== ROUTINE PRINCIPALE ========================
 def main():
-    seed_everything(0)
     # --- Configurazione Globale ---
     torch.set_default_dtype(torch.float64)
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
