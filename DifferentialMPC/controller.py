@@ -320,15 +320,6 @@ class DifferentiableMPCController(torch.nn.Module):
 
         return Xs, Us
 
-    # Sostituire questo metodo nella classe DifferentiableMPCController (cella [32])
-
-    # Sostituire questo metodo nella classe DifferentiableMPCController
-    # Assicurati che il tuo metodo solve_step nella classe DifferentiableMPCController sia questo.
-    # La parte cruciale è alla fine.
-
-    # Sostituisci il metodo solve_step nella tua classe DifferentiableMPCController con questo.
-    # Nota come alla fine vengono impostati self.H_last, self.F_last, ecc.
-
     def solve_step(
             self,
             x0: torch.Tensor,
@@ -424,8 +415,6 @@ class DifferentiableMPCController(torch.nn.Module):
 
         return u_opt, x_next
 
-    # Aggiunga anche questo metodo helper che è stato usato sopra in 'solve_step'
-    # Lo può mettere dentro la classe DifferentiableMPCController
     def forward_pass_batched(self, x0, X_ref, U_ref, K, k):
         """
         Esegue il forward pass per l'intero batch usando vmap.
@@ -490,7 +479,7 @@ class DifferentiableMPCController(torch.nn.Module):
         X[:, 0] = x0
         xt = x0
 
-        # loop temporale (T è piccolo e fisso → ok in Python)
+        # loop temporale
         for t in range(T):
             ut = U[:, t]  # (B, nu)
             xt = self.f_dyn(xt, ut, self.dt)  # f_dyn deve supportare batch
@@ -520,19 +509,19 @@ class DifferentiableMPCController(torch.nn.Module):
             if B > 1 and u_ref_b.shape[0] == 1:
                 u_ref_b = u_ref_b.expand(B, -1, -1)
 
-            # La funzione da vettorizzare ora accetta i riferimenti
+
             _quad_fn = lambda Xi, Ui, x_ref_i, u_ref_i: self.cost_module.quadraticize(
                 Xi, Ui, x_ref_override=x_ref_i, u_ref_override=u_ref_i
             )
 
             # Passa i batch di traiettorie e riferimenti a vmap
             l_tau, H_tau, lN, HN = _vmap(_quad_fn)(X, U, x_ref_b, u_ref_b)
-            # --- FINE MODIFICA ---
+
         else:
             # Il caso unbatched chiama direttamente la funzione (che userà self.x_ref)
             l_tau, H_tau, lN, HN = self.cost_module.quadraticize(X, U)
 
-        # La logica di slicing successiva rimane invariata
+
         l_x = l_tau[..., :, :nx]
         l_u = l_tau[..., :, nx:]
         l_xx = H_tau[..., :, :nx, :nx]
@@ -714,8 +703,9 @@ class DifferentiableMPCController(torch.nn.Module):
                                          0.1, 0.05, 0.01, 0.005, 0.0001)
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
+        Soluzione da cambiare in futuro con qualcosa di robusto
         Valuta in parallelo tutte le alpha restituisce la prima che riduce il costo,
-        altrimenti la migliore. NB operazione in parallelo per migliorare l efficienza anche su GPU
+        altrimenti la migliore. NB operazione in parallelo per migliorare l efficienza anche GPU
         """
         device, dtype = x0.device, x0.dtype
         nx, nu, T = self.nx, self.nu, self.horizon
@@ -788,7 +778,7 @@ class DifferentiableMPCController(torch.nn.Module):
         return mask
 
     # -----------------------------------------------------------------
-    def eq8_gradients(
+    def eq8_gradients( #da eliminare
             self,
             grad_tau_x: torch.Tensor,
             grad_tau_u: torch.Tensor
@@ -936,8 +926,7 @@ class DifferentiableMPCController(torch.nn.Module):
 
     def reset(self) -> None:
         """
-        Resetta lo stato interno del controller memorizzato dall'ultima esecuzione.
-        Questo è fondamentale per l'uso in cicli di training dove .backward()
+        Resetta lo stato interno del controller memorizzato dall'ultima esecuzione workaround per l'uso in cicli di training dove .backward()
         viene chiamato ripetutamente.
         """
         if self.verbose > 0:

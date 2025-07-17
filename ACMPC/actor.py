@@ -26,7 +26,7 @@ class ActorMPC(nn.Module):
         self.horizon = horizon
         self.dt = dt
         self.device = torch.device(device)
-        self.dtype = torch.double  # L'MPC differenziabile spesso richiede double precision
+        self.dtype = torch.double  # serve effetivamente?
 
         # --- 1. Definizione della Neural Cost Map ---
         state_dim = nx

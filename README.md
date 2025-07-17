@@ -11,8 +11,8 @@ TACDMPC implements an Actor–Critic architecture where the actor embeds a diffe
 
 1. **Actor** – operates on matrix weight of the DMPC in order to optimize them
 2. **Critic** – Transformer encoder estimating the Q-value from past state/action pairs.
-
-
+3. **DMPC** - A differential model predictive control fully batched and speed up ispired by AMOS
+4. **KoopmanAutoencoders** - A powerful tool for system identification, allows to approximate from real non linear system to a  globally linear system from data
 ## Installation
 
 Create a Python ≥3.11 environment and install the package with optional extras for development and examples:
@@ -40,12 +40,6 @@ Each script inside `examples/` can be launched as a module:
 python -m examples.01_demo_linear_tracking
 python -m examples.02_demo_cartpole_regulation
 python -m examples.03_demo_cartpole_regulationAC
-```
-
-Alternatively a convenience entry point is installed:
-
-```bash
-ac-mpc-examples 03_demo_cartpole_regulationAC
 ```
 
 ## Reproducibility
