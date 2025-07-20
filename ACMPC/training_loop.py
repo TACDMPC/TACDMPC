@@ -1,10 +1,12 @@
 import torch
 import torch.optim as optim
+import torch.nn.functional as F
 from torch.cuda.amp import GradScaler
 from torch.amp.autocast_mode import autocast
 from torch.func import vmap
 from typing import Callable, Optional
 
+# Importazioni corrette (non relative)
 from .parallel_env import ParallelEnvManager
 from .actor import ActorMPC
 from .critic_transformer import CriticTransformer
@@ -42,8 +44,6 @@ def train(
         mpc_horizon: int,
         gamma: float = 0.99,
         lam: float = 0.97,
-        mpve_gamma: float = 0.99,
-        mpve_weight: float = 0.1,
         checkpoint_manager: Optional[CheckpointManager] = None,
         resume_from: str = "latest",
         use_amp: bool = False,
@@ -62,7 +62,7 @@ def train(
     if checkpoint_manager:
         start_step = checkpoint_manager.load(
             device=device, resume_from=resume_from, actor=actor, critic=critic,
-            actor_optimizer=actor_opt, critic_optimizer=critic_opt, scaler=scaler,
+            actor_optimizer=actor_opt, critic_optimizer=critic_opt
         )
 
     envs = ParallelEnvManager(env_fn, num_envs, device)
@@ -73,104 +73,67 @@ def train(
         states_buf = torch.zeros(num_envs, episode_len, actor.nx, device=device, dtype=actor.dtype)
         actions_buf = torch.zeros(num_envs, episode_len, actor.nu, device=device, dtype=actor.dtype)
         rewards_buf = torch.zeros(num_envs, episode_len, 1, device=device, dtype=actor.dtype)
-        log_probs_buf = torch.zeros(num_envs, episode_len, device=device, dtype=actor.dtype)
-        pred_states_buf = torch.zeros(num_envs, episode_len, mpc_horizon + 1, actor.nx, device=device,
-                                      dtype=actor.dtype)
-        pred_actions_buf = torch.zeros(num_envs, episode_len, mpc_horizon, actor.nu, device=device, dtype=actor.dtype)
 
         current_states = envs.reset()
-        for t in range(episode_len):
-            # Rimosso with torch.no_grad() per permettere la propagazione dei gradienti attraverso l'MPC
-            actions, log_probs, pred_states, pred_actions = actor(current_states)
-
-            # Usiamo .detach() per passare i tensori all'ambiente, che non richiede gradienti
-            next_states, rewards, dones, infos = envs.step(actions.detach())
-
-            states_buf[:, t] = current_states
-            actions_buf[:, t] = actions
-            rewards_buf[:, t] = rewards.unsqueeze(1) if rewards.ndim == 1 else rewards
-            log_probs_buf[:, t] = log_probs
-            pred_states_buf[:, t] = pred_states.detach()
-            pred_actions_buf[:, t] = pred_actions.detach()
-            current_states = next_states
+        with torch.no_grad():
+            for t in range(episode_len):
+                actions, _, _, _ = actor(current_states, deterministic=False)
+                next_states, rewards, _, _ = envs.step(actions)
+                states_buf[:, t] = current_states
+                actions_buf[:, t] = actions
+                rewards_buf[:, t] = rewards.unsqueeze(-1)
+                current_states = next_states
 
         # Fase 2: Calcolo delle Loss
-        with autocast(device_type=str(device).split(":")[0], dtype=torch.float16, enabled=use_amp):
-            L, D_token = critic.history_len, critic.token_dim
-            real_tokens = torch.cat([states_buf.detach(), actions_buf.detach()], dim=-1)
-            padded_tokens = torch.cat(
-                [torch.zeros(num_envs, L - 1, D_token, device=device, dtype=actor.dtype), real_tokens], dim=1)
-            history_batch = padded_tokens.unfold(dimension=1, size=L, step=1).permute(0, 1, 3, 2).contiguous()
+        # --- MODIFICA CHIAVE: Aggiunto bool() per sicurezza ---
+        with autocast(device_type=str(device).split(":")[0], dtype=torch.float16, enabled=bool(use_amp)):
+            L = critic.history_len
+            tokens = torch.cat([states_buf, actions_buf], dim=-1)
+            padded_tokens = F.pad(tokens, (0, 0, L - 1, 0))
+            critic_input_windows = padded_tokens.unfold(dimension=1, size=L, step=1).permute(0, 1, 3, 2)
 
             with torch.no_grad():
-                values_all_tokens = critic(history_batch.view(-1, L, D_token), use_causal_mask=True)
-                values = values_all_tokens[:, -1].view(num_envs, episode_len, 1)
+                values_flat = critic(critic_input_windows.reshape(-1, L, critic.token_dim))
+                values = values_flat[:, -1].view(num_envs, episode_len)
 
-            advantages, returns = batched_compute_gae(rewards_buf, values)
+            _, returns = batched_compute_gae(rewards_buf.squeeze(-1), values)
 
-            # --- MODIFICA CHIAVE: Ripristinata la chiamata corretta con 3 argomenti ---
-            predicted_rewards = reward_fn(
-                pred_states_buf[..., :-1, :],
-                pred_actions_buf,
-                pred_states_buf[..., 1:, :]
-            )
-            # --------------------------------------------------------------------------
+            # Ricolleghiamo i grafi per il calcolo delle loss
+            _, _, _, pred_actions = actor(states_buf.reshape(-1, actor.nx))
+            actor_tokens = torch.cat([states_buf.reshape(-1, actor.nx), pred_actions[:, 0, :]], dim=-1)
+            values_for_actor = critic(actor_tokens.unsqueeze(1))
+            actor_loss = -values_for_actor.mean()
 
-            predicted_tokens = torch.cat([pred_states_buf[..., :-1, :], pred_actions_buf], dim=-1)
-            full_sequence = torch.cat([history_batch, predicted_tokens], dim=2)
-            full_sequence_reshaped = full_sequence.view(-1, L + mpc_horizon, D_token)
-
-            all_values = critic(full_sequence_reshaped, use_causal_mask=True)
-            predicted_values = all_values[:, L:]
-
-            with torch.no_grad():
-                mpve_targets = torch.zeros_like(predicted_rewards)
-                next_val = all_values[:, -1].view(num_envs, episode_len)
-                for k_rev in reversed(range(mpc_horizon)):
-                    target = predicted_rewards[:, :, k_rev] + mpve_gamma * next_val
-                    mpve_targets[:, :, k_rev] = target
-                    next_val = target
-
-            loss_mpve = torch.nn.functional.mse_loss(predicted_values, mpve_targets.view(-1, mpc_horizon))
-            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-
-            # log_probs_buf ora ha i gradienti, quindi la loss dell'attore funzionerà
-            actor_loss = -(log_probs_buf * advantages.squeeze(-1)).mean()
-
-            # Per la critic_loss_gae, il target `returns` non ha gradienti. Dobbiamo calcolare
-            # i valori di nuovo con i gradienti per la backpropagation.
-            values_with_grad_all_tokens = critic(history_batch.view(-1, L, D_token), use_causal_mask=True)
-            values_with_grad = values_with_grad_all_tokens[:, -1].view(num_envs, episode_len, 1)
-            critic_loss_gae = torch.nn.functional.mse_loss(values_with_grad, returns)
-
-            critic_loss = critic_loss_gae + mpve_weight * loss_mpve
+            values_new_flat = critic(critic_input_windows.reshape(-1, L, critic.token_dim))
+            values_new = values_new_flat[:, -1].view(num_envs, episode_len)
+            critic_loss = F.mse_loss(values_new, returns)
 
         # Fase 3: Ottimizzazione
         actor_opt.zero_grad(set_to_none=True)
         critic_opt.zero_grad(set_to_none=True)
 
-        # Facciamo la backward separatamente per maggiore chiarezza e robustezza
+        # Usiamo una loss totale per un backward più pulito, ma qui separiamo
+        # per mantenere la logica precedente, che è comunque valida.
         scaler.scale(actor_loss).backward(retain_graph=True)
         scaler.scale(critic_loss).backward()
 
-        scaler.unscale_(actor_opt);
+        scaler.unscale_(actor_opt)
         torch.nn.utils.clip_grad_norm_(actor.parameters(), 1.0)
-        scaler.unscale_(critic_opt);
+        scaler.step(actor_opt)
+
+        scaler.unscale_(critic_opt)
         torch.nn.utils.clip_grad_norm_(critic.parameters(), 1.0)
-        scaler.step(actor_opt);
         scaler.step(critic_opt)
+
         scaler.update()
 
         # Logging
         with torch.no_grad():
             mean_reward = rewards_buf.mean().item()
-            value_mean = values.mean().item()
-            value_std = values.std().item()
         print("-" * 70)
         print(
             f"Step {step_idx + 1}/{steps} | Actor Loss: {actor_loss.item():.4f} | Critic Loss: {critic_loss.item():.4f}")
-        print(f"  Metrica | Reward Medio: {mean_reward:.3f} | Valore Medio: {value_mean:.3f} (± {value_std:.3f})")
-        print(f"  Losses  | GAE Loss: {critic_loss_gae.item():.4f} | MPVE Loss: {loss_mpve.item():.4f}")
+        print(f"  Metrica | Reward Medio: {mean_reward:.3f}")
         print("-" * 70)
 
         if checkpoint_manager:
