@@ -1,4 +1,4 @@
-# examples/02_demo_cartpole_regulation_updated.py
+# examples/02_demo_cartpole_comparison.py
 import time
 import torch
 import numpy as np
@@ -7,216 +7,202 @@ from dataclasses import dataclass
 import gym
 import os
 from contextlib import redirect_stdout
-
-# Importa le classi principali dalla nuova codebase
-# Assicurati che i file 'controller.py' e 'cost.py' siano nella stessa directory
-# o in un percorso accessibile da Python.
-from DifferentialMPC import DifferentiableMPCController
+from typing import Dict
+from DifferentialMPC import DifferentiableMPCController, GradMethod
 from DifferentialMPC import GeneralQuadCost
 
-
-# ======================== DEFINIZIONE DEL SISTEMA CART-POLE ========================
 @dataclass(frozen=True)
 class CartPoleParams:
-    """Parametri fisici del sistema Cart-Pole."""
-    m_c: float
-    m_p: float
-    l: float
+    m_c: float;
+    m_p: float;
+    l: float;
     g: float
 
     @classmethod
     def from_gym(cls):
-        """Estrae i parametri dall'ambiente Gym 'CartPole-v1'."""
-        # Sopprime l'output di benvenuto di gym
         with open(os.devnull, 'w') as f, redirect_stdout(f):
             env = gym.make("CartPole-v1")
-        # I parametri in gym sono leggermente diversi, ma li usiamo per coerenza
-        return cls(
-            m_c=float(env.unwrapped.masscart),
-            m_p=float(env.unwrapped.masspole),
-            l=float(env.unwrapped.length),
-            g=float(env.unwrapped.gravity)
-        )
+        return cls(m_c=float(env.unwrapped.masscart), m_p=float(env.unwrapped.masspole),
+                   l=float(env.unwrapped.length), g=float(env.unwrapped.gravity))
 
 
 def f_cartpole(x: torch.Tensor, u: torch.Tensor, dt: float, p: CartPoleParams) -> torch.Tensor:
-    """
-    Dinamica non lineare del Cart-Pole.
-    Gestisce il batching automatico lungo la prima dimensione.
-    Input:
-        x: (B, 4) - [pos, vel, theta, omega]
-        u: (B, 1) - [forza]
-    Output:
-        next_state: (B, 4)
-    """
-    pos, vel, theta, omega = torch.unbind(x, dim=-1)
-    force = u.squeeze(-1)
-
+    """Dinamica non lineare del Cart-Pole (supporta batch)."""
+    pos, vel, theta, omega = x.split(1, dim=-1)
+    force = u
     sin_t, cos_t = torch.sin(theta), torch.cos(theta)
-    total_mass = p.m_c + p.m_p
-    m_p_l = p.m_p * p.l
-
+    total_mass, m_p_l = p.m_c + p.m_p, p.m_p * p.l
     temp = (force + m_p_l * omega.pow(2) * sin_t) / total_mass
     theta_dd = (p.g * sin_t - cos_t * temp) / (p.l * (4.0 / 3.0 - p.m_p * cos_t.pow(2) / total_mass))
     vel_dd = temp - m_p_l * theta_dd * cos_t / total_mass
+    x_dot = torch.cat([vel, vel_dd, omega, theta_dd], dim=-1)
+    return x + x_dot * dt
 
-    # Integrazione di Eulero
-    next_state = torch.stack((
-        pos + vel * dt,
-        vel + vel_dd * dt,
-        theta + omega * dt,
-        omega + theta_dd * dt
-    ), dim=-1)
-    return next_state
 
-# ======================== FUNZIONI DI PLOTTING ========================
-def _plot_results(xs_mpc: torch.Tensor, us_mpc: torch.Tensor, dt: float, target: torch.Tensor, batch_size: int):
-    """Visualizza i risultati della simulazione del Cart-Pole."""
-    nx = xs_mpc.shape[-1]
-    N_TO_PLOT = min(10, batch_size)
-    labels = ["Posizione [m]", "Velocità [m/s]", "Angolo [rad]", "Vel. Angolare [rad/s]"]
-    time_state = torch.arange(xs_mpc.shape[1]) * dt
-    time_ctrl = torch.arange(us_mpc.shape[1]) * dt
-    colors = plt.cm.viridis(np.linspace(0, 1, N_TO_PLOT))
+def f_cartpole_jac_batched(x: torch.Tensor, u: torch.Tensor, dt: float, p: CartPoleParams) -> tuple[
+    torch.Tensor, torch.Tensor]:
+    B = x.shape[0]
+    pos, vel, theta, omega = x.split(1, dim=-1)
+    force = u
+    sin_t, cos_t = torch.sin(theta), torch.cos(theta)
+    total_mass = p.m_c + p.m_p
+    m_p_l = p.m_p * p.l
+    temp = (force + m_p_l * omega.pow(2) * sin_t) / total_mass
+    theta_dd_num = (p.g * sin_t - cos_t * temp)
+    theta_dd_den = (p.l * (4.0 / 3.0 - p.m_p * cos_t.pow(2) / total_mass))
+    theta_dd = theta_dd_num / theta_dd_den
+    d_temp_d_force = torch.full_like(force, 1 / total_mass)
+    d_temp_d_theta = m_p_l * omega.pow(2) * cos_t / total_mass
+    d_temp_d_omega = 2 * m_p_l * omega * sin_t / total_mass
+    d_num_d_theta = p.g * cos_t + sin_t * temp - cos_t * d_temp_d_theta
+    d_den_d_theta = p.l * (2 * p.m_p * cos_t * sin_t / total_mass)
+    d_theta_dd_d_theta = (d_num_d_theta * theta_dd_den - theta_dd_num * d_den_d_theta) / theta_dd_den.pow(2)
+    d_theta_dd_d_omega = (-cos_t * d_temp_d_omega) / theta_dd_den
+    d_theta_dd_d_force = (-cos_t * d_temp_d_force) / theta_dd_den
+    d_vel_dd_d_theta = d_temp_d_theta - (m_p_l / total_mass) * (d_theta_dd_d_theta * cos_t - theta_dd * sin_t)
+    d_vel_dd_d_omega = d_temp_d_omega - (m_p_l / total_mass) * d_theta_dd_d_omega * cos_t
+    d_vel_dd_d_force = d_temp_d_force - (m_p_l / total_mass) * d_theta_dd_d_force * cos_t
+    I = torch.eye(4, device=x.device, dtype=x.dtype).unsqueeze(0).expand(B, -1, -1)
+    J_c = torch.zeros(B, 4, 4, device=x.device, dtype=x.dtype)
+    J_c[:, 0, 1] = 1.0
+    J_c[:, 1, 2] = d_vel_dd_d_theta.squeeze(-1)
+    J_c[:, 1, 3] = d_vel_dd_d_omega.squeeze(-1)
+    J_c[:, 2, 3] = 1.0
+    J_c[:, 3, 2] = d_theta_dd_d_theta.squeeze(-1)
+    J_c[:, 3, 3] = d_theta_dd_d_omega.squeeze(-1)
 
-    # --- Figura 1: Traiettorie di Stato ---
-    fig, axs = plt.subplots(nx, 1, figsize=(12, 10), sharex=True)
-    fig.suptitle(f"Traiettorie di Stato per {N_TO_PLOT} Agenti (su {batch_size} totali)")
-    for i in range(nx):
-        for b in range(N_TO_PLOT):
-            label = f'Agente {b + 1}' if i == 0 else None
-            axs[i].plot(time_state, xs_mpc[b, :, i], color=colors[b], alpha=0.7, label=label)
-        axs[i].axhline(target[i].item(), linestyle=":", color="k", label="Target" if i == 0 else "")
-        axs[i].set_ylabel(labels[i])
-        axs[i].grid(True, which='both', linestyle='--', linewidth=0.5)
+    A = I + J_c * dt
 
-    if N_TO_PLOT > 0:
-        fig.legend(loc='upper right', bbox_to_anchor=(0.95, 0.95))
-    axs[-1].set_xlabel("Tempo [s]")
-    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    B_mat = torch.zeros(B, 4, 1, device=x.device, dtype=x.dtype)
+    B_mat[:, 1, 0] = d_vel_dd_d_force.squeeze(-1) * dt
+    B_mat[:, 3, 0] = d_theta_dd_d_force.squeeze(-1) * dt
 
-    # --- Figura 2: Comandi di controllo ---
-    plt.figure(figsize=(12, 6))
-    plt.title(f"Comandi di Controllo per {N_TO_PLOT} Agenti")
-    for b in range(N_TO_PLOT):
-        plt.plot(time_ctrl, us_mpc[b, :, 0], color=colors[b], alpha=0.7, label=f'Agente {b + 1}')
-    plt.xlabel("Tempo [s]")
-    plt.ylabel("Forza [N]")
-    plt.grid(True, which='both', linestyle='--', linewidth=0.5)
-    if N_TO_PLOT > 0:
-        plt.legend()
-    plt.tight_layout()
+    return A, B_mat
 
-    plt.show()
+def _plot_comparison(results_analytic: Dict, results_autodiff: Dict):
+    fig, axs = plt.subplots(1, 3, figsize=(24, 7), gridspec_kw={'width_ratios': [2, 1, 1]})
+    fig.suptitle("Confronto Prestazioni: Jacobiano Analitico vs. Auto-Diff (Cart-Pole)", fontsize=18, weight='bold')
+    ax = axs[0]
+    agent_to_plot = 0
+    sim_len = results_analytic['Xs'].shape[1] - 1
+    dt = results_analytic['dt']
+    time_ax = torch.arange(sim_len + 1) * dt
+    ax.plot(time_ax, results_analytic['Xs'][agent_to_plot, :, 2].cpu(), 'b-', label='Angolo (Analitico)')
+    ax.plot(time_ax, results_autodiff['Xs'][agent_to_plot, :, 2].cpu(), 'g-.', label='Angolo (Auto-Diff)', alpha=0.8)
+    ax.axhline(0, color='r', linestyle='--', label='Target')
+    ax.set_title(f"Regolazione dell'Angolo (Agente #{agent_to_plot + 1})")
+    ax.set_xlabel("Tempo [s]"), ax.set_ylabel("Angolo [rad]")
+    ax.grid(True, linestyle='--', linewidth=0.5), ax.legend()
+
+    ax = axs[1]
+    times_data = [results_analytic['per_step_times'], results_autodiff['per_step_times']]
+    labels = ['Analitico', 'Auto-Diff']
+    box = ax.boxplot(times_data, patch_artist=True, labels=labels)
+    colors = ['lightblue', 'lightgreen']
+    for patch, color in zip(box['boxes'], colors): patch.set_facecolor(color)
+    ax.set_title("Distribuzione Tempi di Esecuzione"), ax.set_ylabel("Tempo per Passo [ms]")
+    ax.grid(True, linestyle='--', linewidth=0.5, axis='y')
+
+    ax = axs[2]
+    final_errors = [results_analytic['final_error'], results_autodiff['final_error']]
+    bars = ax.bar(labels, final_errors, color=colors, edgecolor='black')
+    ax.set_title("Errore Assoluto Medio Finale (Angolo)"), ax.set_ylabel("Errore [rad]")
+    ax.grid(True, linestyle='--', linewidth=0.5, axis='y')
+    for bar in bars:
+        yval = bar.get_height()
+        ax.text(bar.get_x() + bar.get_width() / 2.0, yval, f'{yval:.4f}', va='bottom', ha='center')
+    fig.tight_layout(rect=[0, 0, 1, 0.95]), plt.show()
+
+def run_simulation(grad_method: str, f_dyn_jac, common_params: Dict) -> Dict:
+    DEVICE, BATCH_SIZE, DT, HORIZON, N_SIM = [common_params[k] for k in
+                                              ['DEVICE', 'BATCH_SIZE', 'DT', 'HORIZON', 'N_SIM']]
+    nx, nu, params = 4, 1, common_params['params']
+    dyn = lambda x, u, dt: f_cartpole(x, u, dt, params)
+
+    print(f"\n--- Avvio Simulazione con grad_method = '{grad_method.upper()}' ---")
+
+    x_target = torch.tensor([0.0, 0.0, 0.0, 0.0], device=DEVICE)
+    x_ref = x_target.repeat(BATCH_SIZE, HORIZON + 1, 1)
+    u_ref = torch.zeros(BATCH_SIZE, HORIZON, nu, device=DEVICE)
+    Q = torch.diag(torch.tensor([10.0, 1.0, 100.0, 1.0], device=DEVICE))
+    R = torch.diag(torch.tensor([0.1], device=DEVICE))
+    C = torch.zeros(HORIZON, nx + nu, nx + nu, device=DEVICE)
+    C[:, :nx, :nx], C[:, nx:, nx:] = Q, R
+    c = torch.zeros(HORIZON, nx + nu, device=DEVICE)
+    C_final = torch.zeros(nx + nu, nx + nu, device=DEVICE)
+    C_final[:nx, :nx] = Q * 10
+    c_final = torch.zeros(nx + nu, device=DEVICE)
+    cost_module = GeneralQuadCost(nx, nu, C, c, C_final, c_final, device=str(DEVICE), x_ref=x_ref, u_ref=u_ref)
+
+    mpc = DifferentiableMPCController(
+        f_dyn=dyn,
+        total_time=HORIZON * DT*5,  # <<< RIGA DA AGGIUNGERE
+        cost_module=cost_module,
+        horizon=HORIZON,
+        step_size=DT,
+        u_min=torch.tensor([-20.0], device=DEVICE),
+        u_max=torch.tensor([20.0], device=DEVICE),
+        grad_method=grad_method,
+        f_dyn_jac=f_dyn_jac,
+        device=str(DEVICE)
+    )
+
+    x_current = common_params['x0']
+    xs_list, us_list, per_step_times = [x_current], [], []
+    for i in range(N_SIM):
+        t_step = time.perf_counter()
+        _, U_opt = mpc.forward(x_current)
+        if DEVICE.type == "cuda": torch.cuda.synchronize()
+        per_step_times.append((time.perf_counter() - t_step) * 1000)
+        u_apply = U_opt[:, 0, :]
+        us_list.append(u_apply)
+        x_current = dyn(x_current, u_apply, DT)
+        xs_list.append(x_current)
+
+    Xs, Us = torch.stack(xs_list, dim=1), torch.stack(us_list, dim=1)
+    final_error = torch.mean(torch.abs(Xs[:, -1, 2])).item()
+    print(f"Tempo medio per passo: {np.mean(per_step_times):.2f} ms")
+    print(f"Errore finale medio (angolo): {final_error:.4f} rad")
+    return {"Xs": Xs, "Us": Us, "per_step_times": np.array(per_step_times), "final_error": final_error, "dt": DT}
+
 
 # ======================== SCRIPT PRINCIPALE ========================
 def main():
-    # --- Configurazione Globale ---
     torch.set_default_dtype(torch.float64)
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Esecuzione Cart-Pole su dispositivo: {DEVICE}")
 
-    BATCH_SIZE = 100
-    DT = 0.05
-    HORIZON = 30  # Orizzonte di predizione dell'MPC (T)
-    N_SIM = 100   # Numero di passi della simulazione in anello chiuso
-
-    # --- Parametri e Dinamica ---
-    params = CartPoleParams.from_gym()
-    nx, nu = 4, 1
-    dyn = lambda x, u, dt: f_cartpole(x, u, dt, params)
-
-    # --- Riferimenti e Costi ---
-    x_target = torch.tensor([0.0, 0.0, 0.0, 0.0], device=DEVICE)
-    # I riferimenti ora vengono gestiti internamente dal modulo di costo,
-    # ma li creiamo per passarglieli all'inizio.
-    x_ref_horizon = x_target.repeat(1, HORIZON + 1, 1) # Shape (1, H+1, nx) per batching
-    u_ref_horizon = torch.zeros(1, HORIZON, nu, device=DEVICE) # Shape (1, H, nu)
-
-    Q = torch.diag(torch.tensor([10.0, 1.0, 100.0, 1.0], device=DEVICE))
-    R = torch.diag(torch.tensor([0.1], device=DEVICE))
-
-    # Costo di tappa (running cost)
-    C = torch.zeros(HORIZON, nx + nu, nx + nu, device=DEVICE)
-    C[:, :nx, :nx] = Q
-    C[:, nx:, nx:] = R
-    c = torch.zeros(HORIZON, nx + nu, device=DEVICE)
-
-    # Costo finale (terminal cost)
-    C_final_mat = torch.zeros(nx + nu, nx + nu, device=DEVICE)
-    C_final_mat[:nx, :nx] = Q * 10
-    c_final = torch.zeros(nx + nu, device=DEVICE)
-
-    cost = GeneralQuadCost(
-        nx=nx, nu=nu, C=C, c=c,
-        C_final=C_final_mat, c_final=c_final,
-        device=str(DEVICE),
-        x_ref=x_ref_horizon, u_ref=u_ref_horizon
-    )
-
-    # --- Setup MPC Controller ---
-    # NOTA: N_sim non è più un parametro del controller, perché il ciclo
-    # di simulazione è ora gestito esternamente.
-    mpc = DifferentiableMPCController(
-        f_dyn=dyn,
-        total_time=HORIZON * DT,
-        step_size=DT,
-        horizon=HORIZON,
-        cost_module=cost,
-        u_min=torch.tensor([-20.0], device=DEVICE),
-        u_max=torch.tensor([20.0], device=DEVICE),
-        grad_method="auto_diff",
-        device=str(DEVICE)
-    )
-
-    # --- Batch di stati iniziali casuali (vicino al punto di instabilità) ---
+    common_params = {
+        'DEVICE': DEVICE, 'BATCH_SIZE': 100, 'DT': 0.05,
+        'HORIZON': 30, 'N_SIM': 100, 'params': CartPoleParams.from_gym()
+    }
     base_state = torch.tensor([0.0, 0.0, 0.2, 0.0], device=DEVICE)
-    x0 = base_state + torch.tensor([0.5, 0.5, 0.2, 0.2], device=DEVICE) * torch.randn(BATCH_SIZE, nx, device=DEVICE)
+    common_params['x0'] = base_state + torch.randn(common_params['BATCH_SIZE'], 4, device=DEVICE) * torch.tensor(
+        [0.5, 0.5, 0.2, 0.2], device=DEVICE)
+    jac_fn_batched = lambda x, u, dt: f_cartpole_jac_batched(x, u, dt, common_params['params'])
 
-    # --- Esecuzione Simulazione (ANELLO CHIUSO ESPLICITO) ---
-    print(f"Avvio del rollout MPC in anello chiuso per {BATCH_SIZE} agenti Cart-Pole...")
-    t_start = time.perf_counter()
+    results_analytic = run_simulation("analytic", jac_fn_batched, common_params)
+    results_autodiff = run_simulation("auto_diff", None, common_params)
 
-    x_current = x0
-    xs_list = [x_current]
-    us_list = []
+    avg_analytic = results_analytic['per_step_times'].mean()
+    avg_autodiff = results_autodiff['per_step_times'].mean()
+    print("\n" + "=" * 50)
+    print("📊 RIEPILOGO PRESTAZIONI (CART-POLE) 📊")
+    print("=" * 50)
+    print(f"Tempo Medio Passo (Analitico Vettorizzato): {avg_analytic:.2f} ms")
+    print(f"Tempo Medio Passo (Auto-Diff Vettorizzato): {avg_autodiff:.2f} ms")
+    if avg_analytic < avg_autodiff:
+        print(f" Il metodo analitico è stato {avg_autodiff / avg_analytic:.2f} volte più veloce.")
+    else:
+        print(f" Il metodo auto-diff è stato {avg_analytic / avg_autodiff:.2f} volte più veloce.")
+    print("-" * 50)
+    print(f"Errore Finale (Analitico): {results_analytic['final_error']:.4f} rad")
+    print(f"Errore Finale (Auto-Diff): {results_autodiff['final_error']:.4f} rad")
+    print("=" * 50)
 
-    # Ciclo di simulazione esplicito
-    for i in range(N_SIM):
-        if i % 20 == 0:
-            print(f"  Passo di simulazione: {i+1}/{N_SIM}")
+    print("\nGenerazione della dashboard di confronto...")
+    _plot_comparison(results_analytic, results_autodiff)
 
-        # 1. Risolvi l'MPC per ottenere la sequenza di controlli ottimali
-        #    La nuova funzione `forward` restituisce l'intera traiettoria ottimale (X*, U*)
-        #    per l'orizzonte H, partendo dallo stato corrente `x_current`.
-        _, U_optimal_horizon = mpc.forward(x_current)
 
-        # 2. Applica solo il primo controllo della sequenza ottimale
-        u_apply = U_optimal_horizon[:, 0, :]
-
-        # 3. Salva lo stato corrente e il controllo applicato
-        us_list.append(u_apply)
-
-        # 4. Propaga la dinamica al passo successivo usando il controllo applicato
-        x_current = dyn(x_current, u_apply, DT)
-        xs_list.append(x_current)
-
-    # Concatena i risultati in tensori per il plotting
-    Xs = torch.stack(xs_list, dim=1)
-    Us = torch.stack(us_list, dim=1)
-
-    if DEVICE.type == "cuda":
-        torch.cuda.synchronize()
-    t_end = time.perf_counter()
-    total_time_ms = (t_end - t_start) * 1000
-
-    print("Rollout completato.")
-    print(f"Tempo totale: {total_time_ms:.2f} ms.")
-    print(f"Tempo medio per passo di simulazione: {total_time_ms / N_SIM:.2f} ms.")
-
-    print("Generazione dei grafici...")
-    _plot_results(Xs.cpu(), Us.cpu(), DT, x_target.cpu(), BATCH_SIZE)
-
-# ======================== ENTRY-POINT ========================
 if __name__ == "__main__":
     main()

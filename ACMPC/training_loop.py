@@ -1,24 +1,35 @@
+
 import torch
 import torch.optim as optim
 import torch.nn.functional as F
 from torch.cuda.amp import GradScaler
 from torch.amp.autocast_mode import autocast
 from torch.func import vmap
-from typing import Callable, Optional
-
-# Importazioni corrette (non relative)
+from typing import Callable, Optional, List
+import matplotlib.pyplot as plt
+from dataclasses import dataclass
+import gym
+import os
+import time
+import logging
 from .parallel_env import ParallelEnvManager
 from .actor import ActorMPC
 from .critic_transformer import CriticTransformer
 from .Checkpoint_Manager import CheckpointManager
 
 
+# Funzioni ausiliarie (rimangono invariate)
+def exemple_hover_reward_fn(state: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
+    target_pos = torch.tensor([0.0, 0.0, 5.0], device=state.device)
+    pos, vel = state[..., :3], state[..., 3:6]
+    pos_error = torch.sum((pos - target_pos) ** 2, dim=-1)
+    vel_error = torch.sum(vel ** 2, dim=-1)
+    action_penalty = torch.sum(action ** 2, dim=-1)
+    return - (pos_error + 0.1 * vel_error + 0.01 * action_penalty)
+
+
 def compute_gae_and_returns(
-        rewards: torch.Tensor,
-        values: torch.Tensor,
-        *,
-        gamma: float = 0.99,
-        lam: float = 1.0,
+        rewards: torch.Tensor, values: torch.Tensor, *, gamma: float = 0.99, lam: float = 1.0
 ) -> tuple[torch.Tensor, torch.Tensor]:
     T = rewards.shape[0]
     values_extended = torch.cat([values, values[-1:]], dim=0)
@@ -28,118 +39,174 @@ def compute_gae_and_returns(
         delta = rewards[t] + gamma * values_extended[t + 1] - values_extended[t]
         last_advantage = delta + gamma * lam * last_advantage
         advantages[t] = last_advantage
-    returns = advantages + values
-    return advantages, returns
+    return advantages + values, advantages
 
-
+#Disattiva le stampe di debug (Refactor di funzione con flag sarebbe bello)
 def train(
-        env_fn: Callable,
-        actor: ActorMPC,
-        critic: CriticTransformer,
-        reward_fn: Callable,
-        steps: int = 1000,
-        *,
-        num_envs: int = 8,
-        episode_len: int = 250,
-        mpc_horizon: int,
-        gamma: float = 0.99,
-        lam: float = 0.97,
-        checkpoint_manager: Optional[CheckpointManager] = None,
-        resume_from: str = "latest",
-        use_amp: bool = False,
-        seed: int | None = None,
-):
+        env_fn: Callable, actor: ActorMPC, critic: CriticTransformer, reward_fn: Callable,
+        steps: int = 1000, *, num_envs: int = 24, episode_len: int = 250, mpc_horizon: int,
+        ppo_epochs: int = 10, clip_param: float = 0.2, entropy_coeff: float = 0.01,
+        mpve_coeff: float = 0.1, gamma: float = 0.99, lam: float = 0.97,
+        checkpoint_manager: Optional[CheckpointManager] = None, resume_from: str = "latest",
+        use_amp: bool = False, seed: int | None = None,
+) -> List[float]:
     if seed is not None:
         torch.manual_seed(seed)
         if torch.cuda.is_available(): torch.cuda.manual_seed_all(seed)
 
     device = actor.device
-    actor_opt = optim.Adam(actor.parameters(), lr=3e-4)
-    critic_opt = optim.Adam(critic.parameters(), lr=3e-4)
-    scaler = GradScaler(enabled=use_amp)
+    actor_optimizer = optim.Adam(actor.parameters(), lr=3e-4)
+    critic_optimizer = optim.Adam(critic.parameters(), lr=3e-4)
+    scaler = torch.amp.GradScaler(enabled=use_amp)
 
     start_step = 0
     if checkpoint_manager:
         start_step = checkpoint_manager.load(
             device=device, resume_from=resume_from, actor=actor, critic=critic,
-            actor_optimizer=actor_opt, critic_optimizer=critic_opt
+            actor_optimizer=actor_optimizer, critic_optimizer=critic_optimizer, scaler=scaler
         )
 
     envs = ParallelEnvManager(env_fn, num_envs, device)
+
+    # --- MODIFICA 1: Ottiene la dimensione corretta dell'osservazione dall'ambiente ---
+    obs_dim = envs.single_observation_space_shape[0]
+
     batched_compute_gae = vmap(compute_gae_and_returns, in_dims=(0, 0))
+    batched_reward_fn = vmap(vmap(reward_fn, in_dims=(0, 0)), in_dims=(0, 0))
+
+    training_rewards = []
 
     for step_idx in range(start_step, steps):
-        # Fase 1: Raccolta Dati
-        states_buf = torch.zeros(num_envs, episode_len, actor.nx, device=device, dtype=actor.dtype)
+        step_start_time = time.time()
+        logging.info(f"--- Inizio Step di Training {step_idx + 1}/{steps} ---")
+
+        # FASE 1: RACCOLTA DATI (ROLLOUT)
+        logging.info(f"Fase 1: Raccolta di {episode_len} campioni da {num_envs} ambienti...")
+        rollout_start_time = time.time()
+
+        # --- MODIFICA 2: Usa obs_dim per creare il buffer degli stati ---
+        states_buf = torch.zeros(num_envs, episode_len, obs_dim, device=device, dtype=actor.dtype)
         actions_buf = torch.zeros(num_envs, episode_len, actor.nu, device=device, dtype=actor.dtype)
-        rewards_buf = torch.zeros(num_envs, episode_len, 1, device=device, dtype=actor.dtype)
+        rewards_buf = torch.zeros(num_envs, episode_len, device=device, dtype=actor.dtype)
+        log_probs_buf = torch.zeros(num_envs, episode_len, device=device, dtype=actor.dtype)
+        pred_states_buf = torch.zeros(num_envs, episode_len, actor.horizon + 1, actor.nx, device=device,
+                                      dtype=actor.dtype)
+        pred_actions_buf = torch.zeros(num_envs, episode_len, actor.horizon, actor.nu, device=device, dtype=actor.dtype)
 
         current_states = envs.reset()
         with torch.no_grad():
             for t in range(episode_len):
-                actions, _, _, _ = actor(current_states, deterministic=False)
-                next_states, rewards, _, _ = envs.step(actions)
-                states_buf[:, t] = current_states
-                actions_buf[:, t] = actions
-                rewards_buf[:, t] = rewards.unsqueeze(-1)
+                actions, log_probs, pred_states, pred_actions = actor(current_states, deterministic=False)
+                next_states, rewards, dones, truncated, infos = envs.step(
+                    actions)  # Assumiamo che step ritorni 5 valori
+
+                # Il buffer degli stati ora ha la dimensione corretta
+                states_buf[:, t], actions_buf[:, t] = current_states, actions
+                rewards_buf[:, t], log_probs_buf[:, t] = rewards, log_probs
+                pred_states_buf[:, t], pred_actions_buf[:, t] = pred_states, pred_actions
+
+                for i in range(num_envs):
+                    # La fine dell'episodio è data da terminated o truncated
+                    if dones[i] or truncated[i]:
+                        reset_obs, _ = envs.envs[i].reset()
+                        next_states[i] = torch.from_numpy(reset_obs).to(device, dtype=actor.dtype)
+
                 current_states = next_states
 
-        # Fase 2: Calcolo delle Loss
-        # --- MODIFICA CHIAVE: Aggiunto bool() per sicurezza ---
-        with autocast(device_type=str(device).split(":")[0], dtype=torch.float16, enabled=bool(use_amp)):
-            L = critic.history_len
-            tokens = torch.cat([states_buf, actions_buf], dim=-1)
-            padded_tokens = F.pad(tokens, (0, 0, L - 1, 0))
-            critic_input_windows = padded_tokens.unfold(dimension=1, size=L, step=1).permute(0, 1, 3, 2)
+        logging.info(f" Raccolta dati completata. (Durata: {time.time() - rollout_start_time:.2f}s)")
 
-            with torch.no_grad():
-                values_flat = critic(critic_input_windows.reshape(-1, L, critic.token_dim))
-                values = values_flat[:, -1].view(num_envs, episode_len)
-
-            _, returns = batched_compute_gae(rewards_buf.squeeze(-1), values)
-
-            # Ricolleghiamo i grafi per il calcolo delle loss
-            _, _, _, pred_actions = actor(states_buf.reshape(-1, actor.nx))
-            actor_tokens = torch.cat([states_buf.reshape(-1, actor.nx), pred_actions[:, 0, :]], dim=-1)
-            values_for_actor = critic(actor_tokens.unsqueeze(1))
-            actor_loss = -values_for_actor.mean()
-
-            values_new_flat = critic(critic_input_windows.reshape(-1, L, critic.token_dim))
-            values_new = values_new_flat[:, -1].view(num_envs, episode_len)
-            critic_loss = F.mse_loss(values_new, returns)
-
-        # Fase 3: Ottimizzazione
-        actor_opt.zero_grad(set_to_none=True)
-        critic_opt.zero_grad(set_to_none=True)
-
-        # Usiamo una loss totale per un backward più pulito, ma qui separiamo
-        # per mantenere la logica precedente, che è comunque valida.
-        scaler.scale(actor_loss).backward(retain_graph=True)
-        scaler.scale(critic_loss).backward()
-
-        scaler.unscale_(actor_opt)
-        torch.nn.utils.clip_grad_norm_(actor.parameters(), 1.0)
-        scaler.step(actor_opt)
-
-        scaler.unscale_(critic_opt)
-        torch.nn.utils.clip_grad_norm_(critic.parameters(), 1.0)
-        scaler.step(critic_opt)
-
-        scaler.update()
-
-        # Logging
+        logging.info("Fase 2: Calcolo Valori e Vantaggi (GAE)...")
+        gae_start_time = time.time()
         with torch.no_grad():
-            mean_reward = rewards_buf.mean().item()
-        print("-" * 70)
-        print(
-            f"Step {step_idx + 1}/{steps} | Actor Loss: {actor_loss.item():.4f} | Critic Loss: {critic_loss.item():.4f}")
-        print(f"  Metrica | Reward Medio: {mean_reward:.3f}")
-        print("-" * 70)
+            values_buf = critic(states_buf.view(-1, 1, obs_dim)).view(num_envs, episode_len)
+        returns, advantages = batched_compute_gae(rewards_buf, values_buf)
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        logging.info(f" Calcolo GAE completato. (Durata: {time.time() - gae_start_time:.2f}s)")
+        logging.info(f"Fase 3: Aggiornamento PPO ({ppo_epochs} epoche)...")
+        ppo_start_time = time.time()
+        b_states = states_buf.view(-1, obs_dim)
+        b_actions = actions_buf.view(-1, actor.nu)
+        b_log_probs_old, b_advantages, b_returns = log_probs_buf.view(-1), advantages.view(-1), returns.view(-1)
+        b_pred_states = pred_states_buf.view(-1, actor.horizon + 1, actor.nx)
+        b_pred_actions = pred_actions_buf.view(-1, actor.horizon, actor.nu)
+        ppo_batch_size = b_states.shape[0]
+        # Aumentata per gestire più dati
+        mini_batch_size = min(512, ppo_batch_size)
+
+        for epoch in range(ppo_epochs):
+            permutation = torch.randperm(ppo_batch_size)
+            for start in range(0, ppo_batch_size, mini_batch_size):
+                end = start + mini_batch_size
+                indices = permutation[start:end]
+
+                mb_states = b_states[indices]
+                mb_actions = b_actions[indices]
+                mb_log_probs_old = b_log_probs_old[indices]
+                mb_advantages = b_advantages[indices]
+                mb_returns = b_returns[indices]
+                mb_pred_states = b_pred_states[indices]
+                mb_pred_actions = b_pred_actions[indices]
+
+                with autocast(device_type=str(device).split(":")[0], dtype=torch.float16, enabled=use_amp):
+                    new_log_probs, entropy = actor.evaluate_actions(mb_states, mb_actions)
+                    ratio = torch.exp(new_log_probs - mb_log_probs_old)
+                    surr1 = ratio * mb_advantages
+                    surr2 = torch.clamp(ratio, 1.0 - clip_param, 1.0 + clip_param) * mb_advantages
+                    actor_loss = -torch.min(surr1, surr2).mean()
+                    entropy_loss = -entropy.mean()
+
+                    new_values = critic(mb_states.unsqueeze(1)).squeeze()
+                    critic_loss_standard = F.mse_loss(new_values, mb_returns)
+
+                    mpve_loss = 0.0
+                    # La loss MPVE si può calcolare solo se la dimensione dello stato predetto dall'MPC (nx)
+                    # è la stessa di quella che si aspetta il critico (obs_dim).
+                    if actor.nx == obs_dim:
+                        pred_rewards = batched_reward_fn(mb_pred_states[:, :-1, :], mb_pred_actions)
+                        with torch.no_grad():
+                            v_h = critic(mb_pred_states[:, -1, :].unsqueeze(1)).squeeze()
+                            mpve_targets = torch.zeros_like(pred_rewards)
+                            next_return = v_h
+                            for t in reversed(range(actor.horizon)):
+                                mpve_targets[:, t] = pred_rewards[:, t] + gamma * next_return
+                                next_return = mpve_targets[:, t]
+
+                        v_predicted = critic(mb_pred_states[:, :-1, :]).squeeze(-1)
+                        mpve_loss = F.mse_loss(v_predicted, mpve_targets)
+
+                    critic_loss = critic_loss_standard + mpve_coeff * mpve_loss
+                    total_loss = actor_loss + entropy_coeff * entropy_loss + critic_loss
+
+                actor_optimizer.zero_grad(set_to_none=True)
+                critic_optimizer.zero_grad(set_to_none=True)
+                scaler.scale(total_loss).backward()
+                scaler.unscale_(actor_optimizer)
+                torch.nn.utils.clip_grad_norm_(actor.parameters(), 1.0)
+                scaler.step(actor_optimizer)
+                scaler.unscale_(critic_optimizer)
+                torch.nn.utils.clip_grad_norm_(critic.parameters(), 1.0)
+                scaler.step(critic_optimizer)
+                scaler.update()
+
+        logging.info(f" Aggiornamento PPO completato. (Durata: {time.time() - ppo_start_time:.2f}s)")
+
+        mean_reward = rewards_buf.mean().item()
+        training_rewards.append(mean_reward)
+        logging.info(
+            f"📊 Risultati Step: Reward Medio: {mean_reward:.3f} | Loss Attore: {actor_loss.item():.4f} | Loss Critico: {critic_loss.item():.4f}"
+        )
 
         if checkpoint_manager:
+            checkpoint_start_time = time.time()
+            logging.info("Fase 4: Salvataggio Checkpoint...")
             checkpoint_manager.save(
                 step=step_idx + 1, actor=actor, critic=critic,
-                actor_optimizer=actor_opt, critic_optimizer=critic_opt,
+                actor_optimizer=actor_optimizer, critic_optimizer=critic_optimizer,
                 scaler=scaler, current_loss=critic_loss.item()
             )
+            logging.info(f"Checkpoint salvato. (Durata: {time.time() - checkpoint_start_time:.2f}s)")
+
+        logging.info(f"--- Step {step_idx + 1} completato in {time.time() - step_start_time:.2f}s ---\n")
+
     envs.close()
+    return training_rewards

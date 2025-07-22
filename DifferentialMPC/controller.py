@@ -22,191 +22,97 @@ except ImportError:
 def _outer(a: Tensor, b: Tensor) -> Tensor:
     return a.unsqueeze(-1) * b.unsqueeze(-2)
 
-""" vecchia implementazione i gradienti non passano
-class ILQRSolve(torch.autograd.Function):
-
-    @staticmethod
-    def forward(ctx,
-                x0: torch.Tensor,
-                controller: 'DifferentiableMPCController',
-                U_init: torch.Tensor) -> torch.Tensor:
-        u_opt, _ = controller.solve_step(x0, U_init)
-        # stacca se non convergente
-        if (not controller.converged) and controller.detach_unconverged:
-            u_opt = u_opt.detach()
-
-        # tensori per backward
-        ctx.controller = controller
-        # Questo ora funzionerà perché self.H_last ecc. sono stati impostati da solve_step
-        ctx.save_for_backward(
-            x0,
-            controller.X_last,
-            controller.U_last,
-            controller.H_last[0], controller.H_last[1], controller.H_last[2],
-            controller.F_last[0], controller.F_last[1],
-            controller.lmb_last,
-            controller.tight_mask_last
-        )
-        return u_opt
-    # ------------------------------------------------------------------
-    @staticmethod
-    def backward(ctx, grad_u_out: torch.Tensor):
-        (
-            _x0,
-            _Xs, Us,                     # Us serve solo per shape di grad_U_init
-            H_xx, H_uu, H_xu,
-            A,  Bm,
-            _lmb,
-            tight_mask,
-        ) = ctx.saved_tensors
-        ctrl = ctx.controller
-
-        B, T, nx, nu = A.shape[0], A.shape[1], ctrl.nx, ctrl.nu
-        device, dtype = A.device, A.dtype
-
-        grad_x0_list = []
-
-        # ------------------------------------------------------------------ #
-        # loop esplicito sul batch (niente vmap -> ok control-flow dinamico)  #
-        # ------------------------------------------------------------------ #
-        for i in range(B):
-            # 1. Costruisci gradiente su τ_u: solo sul primo comando
-            grad_tau_u = torch.cat(
-                [grad_u_out[i].unsqueeze(0),
-                 torch.zeros(T - 1, nu, dtype=dtype, device=device)],
-                dim=0
-            )
-
-            # 2. Patch temporaneo di U_last (shape (T,nu) attesa dallo solver)
-            U_last_orig = ctrl.U_last
-            if U_last_orig.ndim == 3:           # (B, T, nu)
-                ctrl.U_last = U_last_orig[i]    # (T, nu)
-
-            # 3. Backward LQR singolo batch
-            dX, _, _ = ctrl._zero_constrained_lqr(
-                A[i], Bm[i],
-                H_xx[i], H_uu[i], H_xu[i],
-                torch.zeros(T + 1, nx, dtype=dtype, device=device),  # grad τ_x = 0
-                grad_tau_u,
-                tight_mask[i],
-                delta_u=ctrl.delta_u,
-            )
-
-            grad_x0_list.append(dX[0])          # ∂ℒ/∂x0 per questo batch
-
-            # 4. Ripristina U_last originale
-            ctrl.U_last = U_last_orig
-
-        # ------------------------------------------------------------------ #
-        # Aggrega risultati e restituisci                                    #
-        # ------------------------------------------------------------------ #
-        grad_x0 = torch.stack(grad_x0_list, dim=0)       # (B, nx)
-        grad_U_init = torch.zeros_like(Us)               # non ottimizziamo U_init
-
-        # ordine: grad_x0, grad_controller(None), grad_U_init
-        return grad_x0, None, grad_U_init
-"""
-
-
 class ILQRSolve(torch.autograd.Function):
     @staticmethod
     def forward(ctx,
                 x0: Tensor,
-                # I parametri da apprendere sono ora input diretti
+                # Parametri e riferimenti sono input espliciti per la differenziabilità
                 C: Tensor, c: Tensor, C_final: Tensor, c_final: Tensor,
-                # Il controller è un "worker", non un input da differenziare
+                x_ref: Tensor, u_ref: Tensor,
                 controller: 'DifferentiableMPCController',
                 U_init: Tensor
                 ) -> Tuple[Tensor, Tensor]:
 
-        # 1. Assegna i costi al modulo del controller per il forward pass
-        # N.B. I costi possono avere una dimensione batch
+        # 1. Assegna parametri e riferimenti al modulo del controller
         controller.cost_module.C = C
         controller.cost_module.c = c
         controller.cost_module.C_final = C_final
         controller.cost_module.c_final = c_final
+        controller.cost_module.set_reference(x_ref, u_ref) # Ora fa parte del grafo
 
-        # 2. Risolvi l'MPC per ottenere le traiettorie ottimali
+        # 2. Risolvi l'MPC
         X_opt, U_opt = controller.solve_step(x0, U_init)
 
-        # 3. Stacca i risultati dal grafo se il solver non converge
+        # 3. Stacca se non convergente
         if (not controller.converged) and controller.detach_unconverged:
             X_opt, U_opt = X_opt.detach(), U_opt.detach()
 
         # 4. Salva i tensori per il backward pass
         ctx.controller = controller
-        # Salviamo i risultati ottimali e i parametri che hanno generato la soluzione
         ctx.save_for_backward(
             X_opt, U_opt,
-            controller.H_last[0], controller.H_last[1], controller.H_last[2],  # H_xx, H_uu, H_xu
-            controller.F_last[0], controller.F_last[1],  # A, Bm
-            controller.tight_mask_last
+            controller.H_last[0], controller.H_last[1], controller.H_last[2],
+            controller.F_last[0], controller.F_last[1],
+            controller.tight_mask_last,
+            x_ref, u_ref  # Salva anche i riferimenti
         )
 
-        # 5. L'output della funzione sono le traiettorie ottimali
         return X_opt, U_opt
+
 
     @staticmethod
     def backward(ctx, grad_X_out: Tensor, grad_U_out: Tensor):
-        """
-        Implementazione completa del backward pass basata sulla teoria di DIFFMPC.
-        """
         # 1. Recupera i dati salvati
-        X, U, H_xx, H_uu, H_xu, A, Bm, tight_mask = ctx.saved_tensors
+        X, U, H_xx, H_uu, H_xu, A, Bm, tight_mask, x_ref, u_ref = ctx.saved_tensors
         ctrl = ctx.controller
-        B = X.shape[0]
+        B, T, nx, nu = X.shape[0], U.shape[1], ctrl.nx, ctrl.nu
 
-        # =================================================================
-        # =============== INIZIO CODICE DI DEBUG ==========================
-        # =================================================================
-        print("\n--- DEBUG: Dentro ILQRSolve.backward ---")
-        print(f"Norma gradiente in ingresso (grad_U_out): {torch.linalg.norm(grad_U_out).item():.4e}")
-        # =================================================================
-
-        # 2. Combina i gradienti in ingresso in un unico tensore `r`
-        r_x = grad_X_out[:, :-1, :]
-        r_u = grad_U_out
-
-        # 3. Risolvi l'LQR all'indietro
+        # 2. Risolvi l'LQR all'indietro per ottenere le sensitività (dX/dθ, dU/dθ)
         dX_list, dU_list = [], []
         for i in range(B):
             dX_i, dU_i, _ = ctrl._zero_constrained_lqr(
                 A[i], Bm[i], H_xx[i], H_uu[i], H_xu[i],
-                -r_x[i], -r_u[i], tight_mask[i]
+                -grad_X_out[i, :-1], -grad_U_out[i], tight_mask[i],U[i]
             )
             dX_list.append(dX_i)
             dU_list.append(dU_i)
-
         dX = torch.stack(dX_list)
         dU = torch.stack(dU_list)
 
-        # =================================================================
-        # =============== ALTRO CODICE DI DEBUG ===========================
-        # =================================================================
-        print(f"Norma sensitività calcolata (dU): {torch.linalg.norm(dU).item():.4e}")
-        # =================================================================
+        # 3. Calcola i gradienti dei parametri di costo
+        # Errore e derivata dell'errore
+        err_x, err_u = X[:, :-1] - x_ref[:, :T], U - u_ref
+        derr_x, derr_u = dX[:, :-1], dU
 
-        # 4. Calcola i gradienti dei parametri di costo
-        dtau = torch.cat([dX[:, :-1, :], dU], dim=-1)
-        tau = torch.cat([X[:, :-1, :], U], dim=-1)
-
+        # Gradiente per costi di tappa (running costs)
+        tau = torch.cat([err_x, err_u], dim=-1)
+        dtau = torch.cat([derr_x, derr_u], dim=-1)
         grad_C = -0.5 * (_outer(dtau, tau) + _outer(tau, dtau))
         grad_c = -dtau
 
-        # =================================================================
-        # =============== CODICE DI DEBUG FINALE ==========================
-        # =================================================================
-        print(f"Norma gradiente finale per C (grad_C): {torch.linalg.norm(grad_C).item():.4e}")
-        print("----------------------------------------\n")
-        # =================================================================
+        # Gradiente per costo finale (terminal cost)
+        err_xN = X[:, -1] - x_ref[:, -1]
+        derr_xN = dX[:, -1]
+        grad_C_final_xx = -0.5 * (_outer(derr_xN, err_xN) + _outer(err_xN, derr_xN))
+        grad_C_final = torch.nn.functional.pad(grad_C_final_xx, (0, nu, 0, nu))
+        grad_c_final = torch.nn.functional.pad(-derr_xN, (0, nu))
 
-        # ... il resto della funzione rimane invariato
-        grad_C_final_xx = -0.5 * (_outer(dX[:, -1], X[:, -1]) + _outer(X[:, -1], dX[:, -1]))
-        grad_C_final = torch.nn.functional.pad(grad_C_final_xx, (0, ctrl.nu, 0, ctrl.nu))
-        grad_c_final = torch.nn.functional.pad(-dX[:, -1], (0, ctrl.nu))
-        grad_x0 = dX[:, 0, :]
+        # 4. Calcola i gradienti degli input originali
+        grad_x0 = dX[:, 0]
+        # dL/dx_ref = (dL/d_err_x) * (d_err_x / dx_ref) = (-derr_x) * (-1) = derr_x
+        grad_xref = torch.zeros_like(x_ref)
+        grad_xref[:, :T, :] = derr_x
+        grad_xref[:, -1, :] = derr_xN
+        grad_uref = derr_u
 
-        return grad_x0, grad_C, grad_c, grad_C_final, grad_c_final, None, None
+        # 5. Restituisci i gradienti nell'ordine corretto degli input di forward()
+        return (
+            grad_x0,
+            grad_C, grad_c, grad_C_final, grad_c_final,
+            grad_xref, grad_uref,
+            None,  # grad per controller
+            None  # grad per U_init
+        )
 
 
 # ─────────────────────────────────────────────────────────────
@@ -357,138 +263,55 @@ class DifferentiableMPCController(torch.nn.Module):
         B = torch.cat(B_cols, dim=-1)  # [nx, nu]
         return A, B
 
-    def oldforward(
-            self,
-            x0: torch.Tensor,
-            x_ref_full: torch.Tensor | None = None,
-            u_ref_full: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Esegue il rollout completo del controllo MPC per N_sim passi, gestendo
-        batch di traiettorie e riferimenti dinamici.
-        """
-        # 1) Normalizza la dimensione del batch per tutti gli input
-        was_unbatched = x0.ndim == 1
-        if was_unbatched:
-            x0 = x0.unsqueeze(0)
-        if x_ref_full is not None and x_ref_full.ndim == 2:
-            x_ref_full = x_ref_full.unsqueeze(0)
-        if u_ref_full is not None and u_ref_full.ndim == 2:
-            u_ref_full = u_ref_full.unsqueeze(0)
-
-        # Estrae le dimensioni
-        B, device, dtype = x0.shape[0], x0.device, x0.dtype
-        H, nu = self.horizon, self.nu
-
-        # 2) Inizializza le variabili per il ciclo
-        x_current = x0
-        U_init = torch.zeros(B, H, nu, device=device, dtype=dtype)
-        if getattr(self, 'U_prev', None) is not None and self.U_prev.shape[0] == B:
-            U_init = torch.roll(self.U_prev, shifts=-1, dims=1)
-            U_init[:, -1] = 0.0
-
-        xs_list, us_list = [x0], []
-
-        # 3) Ciclo di controllo MPC in anello chiuso
-        for t in range(self.N_sim):
-            x_ref_window = (
-                x_ref_full[:, t: t + H + 1, :] if x_ref_full is not None else None
-            )
-            u_ref_window = (
-                u_ref_full[:, t: t + H, :] if u_ref_full is not None else None
-            )
-
-            # Aggiorna i riferimenti nel modulo costi
-            if x_ref_window is not None or u_ref_window is not None:
-                self.cost_module.set_reference(
-                    x_ref=x_ref_window,
-                    u_ref=u_ref_window,
-                )
-            u_opt = ILQRSolve.apply(x_current, self, U_init)
-            us_list.append(u_opt)
-            x_current = self.f_dyn(x_current, u_opt, self.dt)
-            xs_list.append(x_current)
-            self.U_prev = self.U_last
-            if self.U_last is not None:
-                U_init = torch.roll(self.U_last, shifts=-1, dims=1)
-                U_init[:, -1] = self.U_last[:, -1]
-
-        # 4) Concatena i risultati in tensori
-        Xs = torch.stack(xs_list, dim=1)
-        Us = torch.stack(us_list, dim=1)
-
-        if was_unbatched:
-            Xs = Xs.squeeze(0)
-            Us = Us.squeeze(0)
-
-        return Xs, Us
-
-    def forward(
-            self,
-            x0: Tensor,
-            U_init: Optional[Tensor] = None
-    ) -> Tuple[Tensor, Tensor]:
-        """
-        Metodo forward principale. Prepara e chiama la funzione autograd ILQRSolve.
-        """
+    def forward(self, x0: Tensor, U_init: Optional[Tensor] = None) -> Tuple[Tensor, Tensor]:
+        B = x0.shape[0] if x0.ndim > 1 else 1
         if U_init is None:
-            U_init = torch.zeros(
-                x0.shape[0], self.horizon, self.nu,
-                device=x0.device, dtype=x0.dtype
-            )
+            U_init = torch.zeros(B, self.horizon, self.nu, device=x0.device, dtype=x0.dtype)
+        C, c, C_final, c_final = self.cost_module.C, self.cost_module.c, self.cost_module.C_final, self.cost_module.c_final
+        x_ref, u_ref = self.cost_module.x_ref, self.cost_module.u_ref
 
-        # Prende i parametri di costo dal suo modulo interno per passarli a ILQRSolve.
-        # Questo è il collegamento che permette ai gradienti di fluire indietro.
-        C = self.cost_module.C
-        c = self.cost_module.c
-        C_final = self.cost_module.C_final
-        c_final = self.cost_module.c_final
-
-        # Chiama la nostra funzione autograd implementata manualmente
-        return ILQRSolve.apply(x0, C, c, C_final, c_final, self, U_init)
+        return ILQRSolve.apply(x0, C, c, C_final, c_final, x_ref, u_ref, self, U_init)
 
     def solve_step(self, x0: Tensor, U_init: Tensor) -> Tuple[Tensor, Tensor]:
-        """Risolve l'iLQR per l'intero batch in parallelo, senza cicli for."""
         B = x0.shape[0]
-        U = U_init.clone()
-        X = self.rollout_trajectory(x0, U)
+        U, X = U_init.clone(), self.rollout_trajectory(x0, U_init)
 
-        best_cost = self.cost_module.objective(X, U)
+        x_ref_batch, u_ref_batch = self.cost_module.x_ref, self.cost_module.u_ref
+        best_cost = self.cost_module.objective(X, U, x_ref_override=x_ref_batch, u_ref_override=u_ref_batch)
 
         for i in range(self.max_iter):
-            # 1. Linearizza e quadratizza per l'intero batch in una sola volta
-            A, Bm = self.linearize_dynamics(X, U)
             l_x, l_u, l_xx, l_xu, l_uu, l_xN, l_xxN = self.cost_module.quadraticize(X, U)
+            A, Bm = self.linearize_dynamics(X, U)
 
-            # 2. Esegui il backward e forward pass in parallelo su tutto il batch
-            bwd_pass_vmap = _vmap(self.backward_lqr)
-            K, k = bwd_pass_vmap(A, Bm, l_x, l_u, l_xx, l_xu, l_uu, l_xN, l_xxN)
+            K, k = _vmap(self.backward_lqr)(A, Bm, l_x, l_u, l_xx, l_xu, l_uu, l_xN, l_xxN)
 
-            fwd_pass_vmap = _vmap(self.forward_pass)
-            X_new, U_new = fwd_pass_vmap(x0, X, U, K, k)
+            # restituisce  i candidati e i loro costi
+            X_candidates, U_candidates, candidate_costs = _vmap(self.evaluate_alphas, in_dims=(0, 0, 0, 0, 0, 0, 0))(
+                x0, X, U, K, k, x_ref_batch, u_ref_batch
+            )
+            best_alpha_indices = torch.argmin(candidate_costs, dim=1)
+            idx_x = best_alpha_indices.view(B, 1, 1, 1).expand(-1, 1, X.shape[1], X.shape[2])
+            X_new = torch.gather(X_candidates, 1, idx_x).squeeze(1)
 
-            # 3. Valuta e aggiorna le soluzioni migliori per ogni elemento del batch
-            new_cost = self.cost_module.objective(X_new, U_new)
+            idx_u = best_alpha_indices.view(B, 1, 1, 1).expand(-1, 1, U.shape[1], U.shape[2])
+            U_new = torch.gather(U_candidates, 1, idx_u).squeeze(1)
+            new_cost = self.cost_module.objective(X_new, U_new, x_ref_override=x_ref_batch, u_ref_override=u_ref_batch)
 
             improved_mask = new_cost < best_cost
-            if not improved_mask.any():  # Se nessuno è migliorato, esci
-                break
+            if not improved_mask.any(): break
 
             best_cost = torch.where(improved_mask, new_cost, best_cost)
+            X = torch.where(improved_mask.view(B, 1, 1), X_new, X)
+            U = torch.where(improved_mask.view(B, 1, 1), U_new, U)
 
-            update_mask_X = improved_mask.view(B, 1, 1)
-            update_mask_U = improved_mask.view(B, 1, 1)
+            self.cost_module.set_reference(x_ref_batch, u_ref_batch)
 
-            X = torch.where(update_mask_X, X_new, X)
-            U = torch.where(update_mask_U, U_new, U)
-
-        self.converged = True  # Semplificato per ora
-
-        # Salva i risultati finali, che verranno usati da ILQRSolve.backward
-        self.H_last = (l_xx, l_uu, l_xu)
-        self.F_last = (A, Bm)
-        self.tight_mask_last = self._compute_tight_mask(U)  # Assicurati che questo metodo esista
-
+        self.converged = True
+        self.cost_module.set_reference(x_ref_batch, u_ref_batch)
+        l_x, l_u, l_xx, l_xu, l_uu, l_xN, l_xxN = self.cost_module.quadraticize(X, U)
+        A, Bm = self.linearize_dynamics(X, U)
+        self.H_last, self.F_last = (l_xx, l_uu, l_xu), (A, Bm)
+        self.tight_mask_last, self.X_last, self.U_last = self._compute_tight_mask(U), X, U
         return X, U
 
     def forward_pass_batched(self, x0, X_ref, U_ref, K, k):
@@ -621,50 +444,32 @@ class DifferentiableMPCController(torch.nn.Module):
         return l_x, l_u, l_xx, l_xu, l_uu, l_xN, l_xxN
 
     # -----------------------------------------------------------------
-    """
-    def linearize_dynamics_old(self, X: torch.Tensor, U: torch.Tensor):
-        A_list, B_list = [], []
-        for t in range(self.horizon):
-            x = X[t].detach().clone().requires_grad_(self.grad_method is GradMethod.AUTO_DIFF)
-            u = U[t].detach().clone().requires_grad_(self.grad_method is GradMethod.AUTO_DIFF)
-            if self.grad_method is GradMethod.ANALYTIC:
-                A_t, B_t = self._jacobian_analytic(x, u)
-            elif self.grad_method is GradMethod.FINITE_DIFF:
-                A_t, B_t = self._jacobian_finite_diff(x, u)
-            else:
-                A_t, B_t = self._jacobian_auto_diff(x, u)
-            A_list.append(A_t)
-            B_list.append(B_t)
-        return torch.stack(A_list), torch.stack(B_list)
-    """
-    def linearize_dynamics(self, X: torch.Tensor, U: torch.Tensor):
-        assert X.ndim == 3 and U.ndim == 3
-        f = lambda x, u: self.f_dyn(x, u, self.dt)
-        try:
-            jac_x = jacrev(f, argnums=0)
-            jac_u = jacrev(f, argnums=1)
 
-            # _vmap(time) ∘ _vmap(batch)
+    def linearize_dynamics(self, X: Tensor, U: Tensor):
+        B, T, nx, nu = X.shape[0], U.shape[1], self.nx, self.nu
+
+        if self.grad_method is GradMethod.AUTO_DIFF and _HAS_VMAP:
+            f = lambda x, u: self.f_dyn(x, u, self.dt)
+            jac_x, jac_u = jacrev(f, argnums=0), jacrev(f, argnums=1)
             A = _vmap(_vmap(jac_x, in_dims=(0, 0)), in_dims=(0, 0))(X[:, :-1], U)
             B = _vmap(_vmap(jac_u, in_dims=(0, 0)), in_dims=(0, 0))(X[:, :-1], U)
+            return A, B
+        elif self.grad_method is GradMethod.ANALYTIC:
+            x_flat = X[:, :-1].reshape(-1, nx)  # Shape: [B*T, nx]
+            u_flat = U.reshape(-1, nu)  # Shape: [B*T, nu]
+            A_flat, B_flat = self.f_dyn_jac(x_flat, u_flat, self.dt)
+            A = A_flat.reshape(B, T, nx, nx)
+            B = B_flat.reshape(B, T, nx, nu)
+            return A, B
 
-            return A, B
-        except RuntimeError as err:
-            if self.debug:
-                logging.warning(
-                    "[linearize_dynamics] autograd-vmap failed – "
-                    "switching to finite-diff.  Msg: %s", err)
-            # X[:-1] perché l’ultima X è X_{T}
+        # Fallback per differenze finite
+        else:
+            print("attenzione il metodo non e differenziabile e non e adatto per RL")
             A, B = jacobian_finite_diff_batched(
-                self.f_dyn, X[:, :-1].reshape(-1, self.nx),  # (B·T, nx)
-                U.reshape(-1, self.nu),  # (B·T, nu)
-                dt=self.dt
+                self.f_dyn, X[:, :-1].reshape(-1, self.nx), U.reshape(-1, self.nu), dt=self.dt
             )
-            # ri-shape per rimettere batch e tempo
-            B_, T = X.shape[0], U.shape[1]
-            A = A.reshape(B_, T, self.nx, self.nx)
-            B = B.reshape(B_, T, self.nx, self.nu)
-            return A, B
+            return A.reshape(B, T, nx, nx), B.reshape(B, T, nx, nu)
+
     # ------------------------------------------------------------------
     def backward_lqr(
             self,
@@ -780,69 +585,40 @@ class DifferentiableMPCController(torch.nn.Module):
         return self.cost_module.objective(X, U)
 
     # -----------------------------------------------------------------
-    def forward_with_linesearch(
-            self,
-            x0: torch.Tensor,  # [nx]
-            X_ref: torch.Tensor,  # [T+1, nx]
-            U_ref: torch.Tensor,  # [T,   nu]
-            K: torch.Tensor,  # [T, nu, nx]
-            k: torch.Tensor,  # [T, nu]
-            alphas: Tuple[float, ...] = (1.0, 0.8, 0.6, 0.4, 0.2,
-                                         0.1, 0.05, 0.01, 0.005, 0.0001)
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+
+    def evaluate_alphas(
+            self, x0: Tensor, X_ref: Tensor, U_ref: Tensor, K: Tensor, k: Tensor,
+            x_ref_traj: Tensor, u_ref_traj: Tensor,
+            alphas: Tuple[float, ...] = (1.0, 0.8, 0.5, 0.2, 0.1)
+    ) -> Tuple[Tensor, Tensor, Tensor]:
         """
-        Soluzione da cambiare in futuro con qualcosa di robusto
-        Valuta in parallelo tutte le alpha restituisce la prima che riduce il costo,
-        altrimenti la migliore. NB operazione in parallelo per migliorare l efficienza anche GPU
+        Calcola le traiettorie e i costi per tutti gli alpha in parallelo.
+        Restituisce tutti i candidati, non solo il migliore.
         """
-        device, dtype = x0.device, x0.dtype
-        nx, nu, T = self.nx, self.nu, self.horizon
-        cost_ref = self.compute_cost(X_ref, U_ref)
+        A = torch.tensor(alphas, dtype=x0.dtype, device=x0.device)
+        n_alpha = A.shape[0]
+        x_current_batch = x0.expand(n_alpha, -1)
 
-        # prepara batch di alpha
-        A = torch.tensor(alphas, dtype=dtype, device=device)[:, None]  # [A,1]
-        n_alpha = A.size(0)
+        xs_list, us_list = [x_current_batch], []
+        for t in range(self.horizon):
+            dx_batch = x_current_batch - X_ref[t]
+            du_batch = A.view(-1, 1) * k[t] + torch.einsum('ij,aj->ai', K[t], dx_batch)
+            u_batch = U_ref[t] + du_batch
+            if self.u_min is not None: u_batch = torch.max(u_batch, self.u_min)
+            if self.u_max is not None: u_batch = torch.min(u_batch, self.u_max)
+            us_list.append(u_batch)
+            x_current_batch = self.f_dyn(x_current_batch, u_batch, self.dt)
+            xs_list.append(x_current_batch)
 
-        # buffer per traiettorie parallele
-        X_batch = torch.empty(n_alpha, T + 1, nx, dtype=dtype, device=device)
-        U_batch = torch.empty(n_alpha, T, nu, dtype=dtype, device=device)
-        X_batch[:, 0] = x0
-        #  funzione dinamica in batch
-        if _HAS_VMAP:
-            f_dyn_batched = _vmap(lambda x, u: self.f_dyn(x, u, self.dt))
-        else:  # fallback: con loop >_>
-            def f_dyn_batched(x, u):
-                return torch.stack([self.f_dyn(x[i], u[i], self.dt)
-                                    for i in range(n_alpha)], dim=0)
+        X_candidates = torch.stack(xs_list, dim=1)  # Shape [n_alpha, H+1, nx]
+        U_candidates = torch.stack(us_list, dim=1)  # Shape [n_alpha, H, nu]
 
-        #  roll-out parallelo
-        x = x0.expand(n_alpha, -1)  # [A, nx]
-        for t in range(T):
-            dx = x - X_ref[t]  # broadcast
-            du = torch.matmul(dx, K[t].T) + A * k[t]  # [A, nu]
-            u = U_ref[t] + du  # [A, nu]
+        objective_fn = lambda x, u: self.cost_module.objective(x, u, x_ref_override=x_ref_traj,
+                                                               u_ref_override=u_ref_traj)
+        candidate_costs = _vmap(objective_fn)(X_candidates, U_candidates)  # Shape [n_alpha]
 
-            #  bounds
-            if self.u_min is not None:
-                u = torch.maximum(u, self.u_min)
-            if self.u_max is not None:
-                u = torch.minimum(u, self.u_max)
+        return X_candidates, U_candidates, candidate_costs
 
-            U_batch[:, t, :] = u
-            x = f_dyn_batched(x, u)  # [A, nx]
-            X_batch[:, t + 1, :] = x
-
-        costs = torch.tensor([self.compute_cost(X_batch[i], U_batch[i]) for i in range(n_alpha)], dtype=dtype,
-                             device=device)
-        improved = costs < cost_ref
-        if improved.any():
-            idx = int(torch.nonzero(improved, as_tuple=False)[0])
-        else:
-            idx = int(torch.argmin(costs))
-        return X_batch[idx], U_batch[idx]
-        # -----------------------------------------------------------------
-
-    # -----------------------------------------------------------------
     def compute_costates(
             self,
             A: torch.Tensor,
@@ -938,6 +714,7 @@ class DifferentiableMPCController(torch.nn.Module):
             grad_x: torch.Tensor,  # [T, nx]
             grad_u: torch.Tensor,  # [T, nu]
             tight_mask: torch.Tensor,  # [T, nu]
+            U_last_i: torch.Tensor,
             delta_u: Optional[float] = None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         T, nx, nu = A.shape[0], self.nx, self.nu
         dtype, device = A.dtype, A.device
@@ -962,8 +739,8 @@ class DifferentiableMPCController(torch.nn.Module):
                 lb = torch.full((nu,), -float('inf'), device=device, dtype=dtype)
                 ub = torch.full((nu,), float('inf'), device=device, dtype=dtype)
                 if self.u_min is not None:
-                    lb = self.u_min - self.U_last[t]
-                    ub = self.u_max - self.U_last[t]
+                    lb = self.u_min - U_last_i[t]
+                    ub = self.u_max - U_last_i[t]
                 if delta_u is not None:
                     lb = torch.maximum(lb, torch.full_like(lb, -delta_u))
                     ub = torch.minimum(ub, torch.full_like(ub, delta_u))
