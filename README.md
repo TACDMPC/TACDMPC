@@ -1,8 +1,5 @@
 # Transformer Actor-Critic with Differentiable MPC (TACDMPC)
 
-
-
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python Version](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-%23EE4C2C.svg?style=flat&logo=PyTorch&logoColor=white)](https://pytorch.org/)
 
@@ -46,36 +43,7 @@ In this library, we leverage this capability for the Critic network:
 * **Superior Learning Signal**: A more accurate value function leads to a more precise advantage estimate (\\$A(s,a)\\$). This provides a higher-quality learning signal to the Actor, helping it learn to parameterize the MPC more effectively.
 
 ### Architectural Flowchart
-
-The data flow during a training step can be visualized as follows:
-
-```mermaid
-graph TD
-    subgraph "Environment Interaction (Rollout)"
-        A[Environment] -- Observation s_t --> B(Actor: Cost Map NN);
-        B -- Cost Matrices C, c --> C{Differentiable MPC};
-        D[Dynamics Model f(x,u)] --> C;
-        C -- Optimal Action a_t --> A;
-    end
-
-    subgraph "Learning Update (PPO)"
-        E[Data Buffer] -- State Sequences --> F(Critic: Transformer);
-        F -- Value Estimates V(s) --> G[GAE Calculation];
-        E -- Rewards --> G;
-        G -- Advantages A(s,a) --> H[PPO Loss];
-        C -- Gradients via MPC --> H;
-        H -- Update Weights --> B;
-        G -- Returns --> H
-        H -- Update Weights --> F;
-    end
-
-    style C fill:#bbf,stroke:#333,stroke-width:2px
-    style B fill:#f9f,stroke:#333,stroke-width:2px
-    style F fill:#9cf,stroke:#333,stroke-width:2px
-```
-
----
-
+TODO
 ## Key Features
 
 * **`ActorMPC`**: A module whose neural network learns a map from environment observations to MPC cost function parameters. This allows the policy to adapt its short-term objectives based on the current context. It elegantly handles the difference between the observation dimension (used by the network) and the physical state dimension (used by the MPC's dynamics model).
@@ -127,7 +95,7 @@ python -m examples.03_demo_unicycle_AC
 ---
 
 ## Testing
-
+NOTE THE TEST REFER TO AN OLD VERSION NOT WORKING ANYMORE
 After installing the development extras (`pip install -e .[dev]`), you can run the test suite using `pytest`. The tests verify gradient propagation and numerical consistency of the differentiable MPC layer.
 
 ```bash
