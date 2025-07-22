@@ -136,7 +136,7 @@ def run_simulation(grad_method: str, f_dyn_jac, common_params: Dict) -> Dict:
 
     mpc = DifferentiableMPCController(
         f_dyn=dyn,
-        total_time=HORIZON * DT*5,  # <<< RIGA DA AGGIUNGERE
+        total_time=HORIZON * DT*5,
         cost_module=cost_module,
         horizon=HORIZON,
         step_size=DT,
@@ -174,7 +174,7 @@ def main():
 
     common_params = {
         'DEVICE': DEVICE, 'BATCH_SIZE': 100, 'DT': 0.05,
-        'HORIZON': 30, 'N_SIM': 100, 'params': CartPoleParams.from_gym()
+        'HORIZON': 20, 'N_SIM': 100, 'params': CartPoleParams.from_gym()
     }
     base_state = torch.tensor([0.0, 0.0, 0.2, 0.0], device=DEVICE)
     common_params['x0'] = base_state + torch.randn(common_params['BATCH_SIZE'], 4, device=DEVICE) * torch.tensor(

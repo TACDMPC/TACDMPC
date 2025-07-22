@@ -69,47 +69,57 @@ class UnicycleEnv(gym.Env):
         info = {}
         return self._get_obs(), info
 
+
     def step(self, action: np.ndarray):
         v, omega = action[0], action[1]
         x, y, theta = self.state
 
         x += v * math.cos(theta) * self.dt
         y += v * math.sin(theta) * self.dt
-        theta += omega * self.dt
+        # Normalizza l'angolo tra [-pi, pi] per stabilità numerica
+        theta = (theta + omega * self.dt + np.pi) % (2 * np.pi) - np.pi
         self.state = np.array([x, y, theta], dtype=np.float32)
         self.current_step += 1
 
         terminated = False
         truncated = self.current_step >= self.max_steps
 
-        # --- Logica della Reward Densa ---
+        # --- Logica della Reward Migliorata ---
         current_wp = self.trajectory[self.waypoint_index]
         dist_to_wp = np.linalg.norm(self.state[:2] - current_wp)
 
-        # 1. Reward di progresso (componente densa)
-        reward_progress = self.previous_dist_to_wp - dist_to_wp
+        # 1. Reward di progresso (componente densa, con peso maggiore)
+        reward_progress = 1.5 * (self.previous_dist_to_wp - dist_to_wp)
         self.previous_dist_to_wp = dist_to_wp
 
-        # 2. Penalità per azioni brusche
-        action_penalty = 0.01 * np.sum(np.square(action))
+        # 2. NUOVO: Reward di Orientamento
+        angle_to_wp = math.atan2(current_wp[1] - y, current_wp[0] - x)
+        angle_diff = abs(theta - angle_to_wp)
+        # Bonus basato sul coseno della differenza di angolo (1 se allineato, -1 se opposto)
+        reward_orientation = 0.2 * (math.cos(angle_diff))
 
-        # Reward totale per questo step
-        reward = reward_progress - action_penalty
+        # 3. Penalità per azioni (leggermente ridotta)
+        action_penalty = 0.005 * np.sum(np.square(action))
 
-        # 3. Bonus per eventi sparsi
+        # 4. NUOVO: Bonus per velocità positiva
+        reward_velocity = 0.05 * v if v > 0.1 else -0.01
+
+        # Reward totale
+        reward = reward_progress + reward_orientation - action_penalty + reward_velocity
+
+        # 5. Bonus/Malus per eventi sparsi (più impattanti)
         if dist_to_wp < self.goal_radius:
-            reward += 10.0  # Bonus per aver raggiunto il waypoint
+            reward += 20.0  # Bonus per aver raggiunto il waypoint
             self.waypoint_index += 1
             if self.waypoint_index >= len(self.trajectory):
                 terminated = True
-                reward += 50.0  # Bonus finale per aver completato il percorso
+                reward += 100.0  # Bonus finale per aver completato il percorso
             else:
-                # Aggiorna la distanza al nuovo waypoint
                 next_wp = self.trajectory[self.waypoint_index]
                 self.previous_dist_to_wp = np.linalg.norm(self.state[:2] - next_wp)
 
         if dist_to_wp > self.fail_radius:
-            reward -= 10.0  # Penalità per fallimento
+            reward -= 20.0  # Penalità per fallimento
             terminated = True
 
         info = {'waypoint_idx': self.waypoint_index, 'dist_to_wp': dist_to_wp}
@@ -195,9 +205,9 @@ if __name__ == '__main__':
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 
     # Definisce una traiettoria a forma di '8'
-    t = np.linspace(-np.pi, np.pi, 20)
-    trajectory = np.stack([5 * np.sin(t), 2.5 * np.sin(2 * t)], axis=1)
-
+   # t = np.linspace(-np.pi, np.pi, 20)
+    #trajectory = np.stack([5 * np.sin(t), 2.5 * np.sin(2 * t)], axis=1)
+    trajectory = np.array([[5.0, 5.0]])
     # Funzioni per ambiente e dinamica
     env_fn = lambda: UnicycleEnv(trajectory=trajectory, dt=DT)
     bound_f_dyn = lambda x, u, _: f_dyn_torch(x, u, dt=DT)
@@ -219,7 +229,7 @@ if __name__ == '__main__':
     critic = CriticTransformer(
         state_dim=OBS_DIM,  # Il critico lavora sull'osservazione completa
         action_dim=NU,
-        history_len=1,
+        history_len=5,
         pred_horizon=MPC_HORIZON,
         hidden_size=256,
         num_layers=4,

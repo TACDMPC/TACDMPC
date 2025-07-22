@@ -9,6 +9,7 @@ from typing import Optional, Dict, Any
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+
 class CheckpointManager:
     """
     Gestisce il salvataggio e il caricamento dei checkpoint di addestramento.
@@ -21,7 +22,8 @@ class CheckpointManager:
         self.best_loss = float('inf')
 
     def save(self,
-             step: int,
+             # --- MODIFICA 1: Rinominiamo 'step' in 'completed_step_idx' per chiarezza ---
+             completed_step_idx: int,
              actor: nn.Module,
              critic: nn.Module,
              actor_optimizer: optim.Optimizer,
@@ -34,7 +36,8 @@ class CheckpointManager:
             self.best_loss = current_loss
 
         checkpoint_state = {
-            'step': step,
+            # --- MODIFICA 2: Salva l'indice dello step appena completato ---
+            'completed_step_idx': completed_step_idx,
             'actor_state_dict': actor.state_dict(),
             'critic_state_dict': critic.state_dict(),
             'actor_optimizer_state_dict': actor_optimizer.state_dict(),
@@ -44,7 +47,8 @@ class CheckpointManager:
             'metadata': metadata if metadata is not None else {}
         }
 
-        filename = self.checkpoint_dir / f"checkpoint_step_{step}.pt"
+        # Usa l'indice (step number = index + 1) per il nome del file per coerenza
+        filename = self.checkpoint_dir / f"checkpoint_step_{completed_step_idx + 1}.pt"
         torch.save(checkpoint_state, filename)
         logging.info(f"Checkpoint salvato in: {filename}")
 
@@ -60,9 +64,7 @@ class CheckpointManager:
 
     def load(self,
              device: torch.device,
-             # --- MODIFICA CHIAVE: Aggiunto l'argomento mancante ---
              resume_from: str = "latest",
-             # ----------------------------------------------------
              actor: Optional[nn.Module] = None,
              critic: Optional[nn.Module] = None,
              actor_optimizer: Optional[optim.Optimizer] = None,
@@ -70,6 +72,7 @@ class CheckpointManager:
              scaler: Optional[GradScaler] = None) -> int:
         """
         Carica un checkpoint in modo flessibile.
+        Restituisce l'INDICE del prossimo step da eseguire.
         """
         if Path(resume_from).is_file():
             checkpoint_path = Path(resume_from)
@@ -77,7 +80,7 @@ class CheckpointManager:
             checkpoint_path = self.checkpoint_dir / f"checkpoint_{resume_from}.pt"
 
         if not checkpoint_path.exists():
-            logging.warning(f"⚠️ Nessun checkpoint trovato in '{checkpoint_path}'. Inizio da zero.")
+            logging.warning(f"⚠️ Nessun checkpoint trovato in '{checkpoint_path}'. Inizio dall'indice 0.")
             return 0
 
         logging.info(f"Caricamento del checkpoint da: {checkpoint_path}")
@@ -95,20 +98,21 @@ class CheckpointManager:
             scaler.load_state_dict(checkpoint['scaler_state_dict'])
 
         self.best_loss = checkpoint.get('best_loss', float('inf'))
-        start_step = checkpoint.get('step', 0) # Ritorna 0 se lo step non è nel checkpoint
 
-        logging.info(f"✅ Training ripreso. Prossimo step: {start_step}. Best loss nota: {self.best_loss:.4f}")
+        # --- MODIFICA 3: Logica di ripresa basata sull'indice completato ---
+        completed_idx = checkpoint.get('completed_step_idx', -1)
+        start_idx = completed_idx + 1
 
-        return start_step
+        logging.info(
+            f"✅ Training ripreso. Ultimo step completato (indice): {completed_idx}. Si riparte dall'indice: {start_idx}.")
+        return start_idx
 
     def _cleanup_checkpoints(self):
         if self.max_to_keep <= 0: return
-
         checkpoints = sorted(
             glob.glob(str(self.checkpoint_dir / "checkpoint_step_*.pt")),
             key=lambda x: int(Path(x).stem.split('_')[-1])
         )
-
         if len(checkpoints) > self.max_to_keep:
             for ckpt_path in checkpoints[:-self.max_to_keep]:
                 Path(ckpt_path).unlink()

@@ -14,7 +14,7 @@ from DifferentialMPC import DifferentiableMPCController, GeneralQuadCost
 class ActorMPC(nn.Module):
     # Aggiunto observation_dim al costruttore ---
     def __init__(self, nx: int, nu: int, horizon: int, dt: float, f_dyn,
-                 f_dyn_jac=None, device: str = "cpu",
+                 f_dyn_jac=None, device: str = "cuda",
                  grad_method: str = "auto_diff",
                  observation_dim: Optional[int] = None): # Nuovo parametro
         super().__init__()
@@ -46,7 +46,7 @@ class ActorMPC(nn.Module):
         )
 
         self.mpc = DifferentiableMPCController(
-            f_dyn=f_dyn, total_time=horizon * dt, step_size=dt,
+            f_dyn=f_dyn, total_time=horizon, step_size=dt,
             horizon=horizon, cost_module=cost_module,
             f_dyn_jac=f_dyn_jac, device=device,
             reg_eps=1e-2,
