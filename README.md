@@ -86,9 +86,9 @@ python -m examples.01_demo_linear_AC
 
 # Example 2: Stabilize a CartPole system
 python -m examples.02_demo_cartpole_AC
-
+```
 ![Benchmark](https://raw.githubusercontent.com/TACDMPC/TACDMPC/MASTER/examples/evaluation_results_cartpole_acmpc.png)
-
+```bash
 # Example 3: Train a unicycle to follow a trajectory NOT FULLY IMPLEMENTED 
 python -m examples.03_demo_unicycle_AC
 ```
