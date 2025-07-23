@@ -22,7 +22,6 @@ class CheckpointManager:
         self.best_loss = float('inf')
 
     def save(self,
-             # --- MODIFICA 1: Rinominiamo 'step' in 'completed_step_idx' per chiarezza ---
              completed_step_idx: int,
              actor: nn.Module,
              critic: nn.Module,
@@ -36,7 +35,6 @@ class CheckpointManager:
             self.best_loss = current_loss
 
         checkpoint_state = {
-            # --- MODIFICA 2: Salva l'indice dello step appena completato ---
             'completed_step_idx': completed_step_idx,
             'actor_state_dict': actor.state_dict(),
             'critic_state_dict': critic.state_dict(),
@@ -99,7 +97,6 @@ class CheckpointManager:
 
         self.best_loss = checkpoint.get('best_loss', float('inf'))
 
-        # --- MODIFICA 3: Logica di ripresa basata sull'indice completato ---
         completed_idx = checkpoint.get('completed_step_idx', -1)
         start_idx = completed_idx + 1
 

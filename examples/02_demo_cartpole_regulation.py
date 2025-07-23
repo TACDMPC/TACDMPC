@@ -174,7 +174,7 @@ def main():
 
     common_params = {
         'DEVICE': DEVICE, 'BATCH_SIZE': 100, 'DT': 0.05,
-        'HORIZON': 20, 'N_SIM': 100, 'params': CartPoleParams.from_gym()
+        'HORIZON': 15, 'N_SIM': 100, 'params': CartPoleParams.from_gym()
     }
     base_state = torch.tensor([0.0, 0.0, 0.2, 0.0], device=DEVICE)
     common_params['x0'] = base_state + torch.randn(common_params['BATCH_SIZE'], 4, device=DEVICE) * torch.tensor(

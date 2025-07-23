@@ -13,15 +13,11 @@ import gym
 import os
 import time
 import logging
-
-# Assicurati che i tuoi import siano corretti in base alla struttura del tuo progetto
 from .parallel_env import ParallelEnvManager
 from .actor import ActorMPC
 from .critic_transformer import CriticTransformer
 from .Checkpoint_Manager import CheckpointManager
 
-
-# Funzioni ausiliarie (invariate)
 def exemple_hover_reward_fn(state: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
     target_pos = torch.tensor([0.0, 0.0, 5.0], device=state.device)
     pos, vel = state[..., :3], state[..., 3:6]
@@ -189,7 +185,7 @@ def train(
                 critic_optimizer.zero_grad(set_to_none=True)
                 scaler.scale(total_loss).backward()
 
-                # ... (logging gradienti invariato) ...
+
                 if epoch == 0 and start == 0:
                     scaler.unscale_(actor_optimizer)
                     actor_grad_norm = torch.nn.utils.clip_grad_norm_(actor.parameters(), float('inf'))

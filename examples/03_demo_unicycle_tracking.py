@@ -3,12 +3,8 @@ import time
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
-
-# Importa le classi principali dal pacchetto
 from DifferentialMPC import DifferentiableMPCController, GeneralQuadCost
 
-
-# ======================== DEFINIZIONE DEL SISTEMA UNICICLO ========================
 def f_dyn_unicycle(state: torch.Tensor, control: torch.Tensor, dt: float) -> torch.Tensor:
     """Dinamica non lineare di un uniciclo, gestisce il batching."""
     x, y, theta = state[..., 0], state[..., 1], state[..., 2]
@@ -66,7 +62,6 @@ def main():
     N_sim = 250  # Passi di simulazione
     nx, nu = 3, 2
 
-    # --- Creazione Traiettorie di Riferimento ---
     ref_len = N_sim + T + 1
     t_ref = torch.linspace(0, 4 * torch.pi, ref_len, device=DEVICE)
 

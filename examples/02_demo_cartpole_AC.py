@@ -97,7 +97,7 @@ class CustomCartPoleEnv(gym.Env):
         if seed is not None:
             np.random.seed(seed)
         # Stato iniziale campionato da una distribuzione uniforme
-        self.state = np.random.uniform(low=-0.05, high=0.05, size=(4,)).astype(np.float32)
+        self.state = np.random.uniform(low=-0.2, high=0.25, size=(4,)).astype(np.float32)
         self.current_step = 0
         if self._render_env:
             self._render_env.close()
@@ -260,7 +260,7 @@ if __name__ == '__main__':
 
     print("\n>>> Inizio della valutazione del modello addestrato <<<")
     eval_results = run_evaluation(
-        actor=actor, env_fn=env_fn, num_episodes=50,
+        actor=actor, env_fn=env_fn, num_episodes=10,
         episode_len=EPISODE_LEN * 2, device=DEVICE
     )
 

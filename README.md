@@ -40,7 +40,6 @@ In this library, we leverage this capability for the Critic network:
 * **Input as a Sequence**: Instead of just the current state \\$s_t\\$, the `CriticTransformer` receives a **sequence of recent states**: (..., \\$s_{t-2}, s_{t-1}, s_t\\$).
 * **Contextual Value Estimation**: The Critic uses self-attention to analyze this recent trajectory. It can learn to identify salient past events (e.g., states leading to instability or high rewards) to produce a more accurate and context-aware value estimate \\$V(\text{history}_t)\\$.
 * **Adaptive Behavior through Memory**: This architecture unlocks qualitatively new capabilities. An agent equipped with such a policy can adapt its strategy **within a single episode**. For instance, after stumbling on a new type of terrain, the agent can "remember" this event (as it is still in its context window) and adjust its behavior when it encounters that terrain again moments later. This is a fundamental step towards truly adaptive systems.
-* **Superior Learning Signal**: A more accurate value function leads to a more precise advantage estimate (\\$A(s,a)\\$). This provides a higher-quality learning signal to the Actor, helping it learn to parameterize the MPC more effectively.
 
 ### Architectural Flowchart
 TODO
@@ -77,7 +76,7 @@ A Python version of **3.11+** is recommended.
 
 ---
 
-## Running the Examples
+## Running the Examples 
 
 The example scripts in the `examples/` directory demonstrate the library's capabilities on various control problems. To run an example, execute it as a Python module from the root of the repository:
 
@@ -88,16 +87,16 @@ python -m examples.01_demo_linear_AC
 # Example 2: Stabilize a CartPole system
 python -m examples.02_demo_cartpole_AC
 
-# Example 3: Train a unicycle to follow a trajectory
+![Benchmark](examples/evaluation_results_cartpole_acmpc.png)
+
+# Example 3: Train a unicycle to follow a trajectory NOT FULLY IMPLEMENTED 
 python -m examples.03_demo_unicycle_AC
 ```
 
 ---
 
 ## Testing
-NOTE THE TEST REFER TO AN OLD VERSION NOT WORKING ANYMORE
-After installing the development extras (`pip install -e .[dev]`), you can run the test suite using `pytest`. The tests verify gradient propagation and numerical consistency of the differentiable MPC layer.
-
+NOTE THE TEST REFER TO AN OLD VERSION NOT WORKING ANYMORE WILL BE UPDATED AS CORE LOGIC IS FINALIZED
 ```bash
 pytest
 ```
